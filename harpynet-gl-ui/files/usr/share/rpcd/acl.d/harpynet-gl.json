@@ -1,0 +1,44 @@
+{
+  "harpynet-gl": {
+    "description": "Grant access to HarpyNet native GL.iNet UI",
+    "read": {
+      "ubus": {
+        "harpynet_gl": [
+          "status",
+          "version",
+          "summary",
+          "logs",
+          "dashboard",
+          "connections"
+        ],
+        "session": [
+          "access"
+        ]
+      },
+      "uci": [
+        "harpynet"
+      ]
+    },
+    "write": {
+      "ubus": {
+        "harpynet_gl": [
+          "start",
+          "stop",
+          "restart",
+          "enable",
+          "disable",
+          "set_subscription",
+          "subscription_update",
+          "set_main_config",
+          "close_connection",
+          "close_all_connections",
+          "select_outbound",
+          "test_latency"
+        ]
+      },
+      "uci": [
+        "harpynet"
+      ]
+    }
+  }
+}

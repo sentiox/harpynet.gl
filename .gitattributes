@@ -1,0 +1,12 @@
+* text=auto
+*.sh text eol=lf
+harpynet/files/usr/bin/harpynet text eol=lf
+harpynet/files/etc/init.d/harpynet text eol=lf
+harpynet-gl-ui/files/usr/libexec/rpcd/harpynet_gl text eol=lf
+harpynet-gl-ui/files/usr/lib/oui-httpd/rpc/harpynet_gl text eol=lf
+*.lua text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+Makefile text eol=lf
+*.png binary
+*.gz binary

@@ -1,0 +1,483 @@
+--[[
+    @object-name: harpynet_gl
+    @object-desc: HarpyNet native GL.iNet UI bridge
+--]]
+
+local M = {}
+
+local function run(argv)
+    local quoted = {}
+    for i, arg in ipairs(argv) do
+        quoted[i] = "'" .. tostring(arg):gsub("'", "'\\''") .. "'"
+    end
+
+    local pipe = io.popen(table.concat(quoted, " ") .. " 2>&1; printf '\\n__HN_RC__%s' $?")
+    if not pipe then
+        return 127, ""
+    end
+
+    local output = pipe:read("*a") or ""
+    pipe:close()
+
+    local body, code = output:match("^(.*)\n__HN_RC__(%d+)$")
+    if code then
+        return tonumber(code) or 1, body or ""
+    end
+
+    return 1, output
+end
+
+local function first_line(text)
+    return (text or ""):match("([^\r\n]+)") or ""
+end
+
+local function json_string(value)
+    return '"' .. tostring(value or "")
+        :gsub("\\", "\\\\")
+        :gsub('"', '\\"')
+        :gsub("\b", "\\b")
+        :gsub("\f", "\\f")
+        :gsub("\n", "\\n")
+        :gsub("\r", "\\r")
+        :gsub("\t", "\\t") .. '"'
+end
+
+local function init_enabled()
+    local rc = run({ "/etc/init.d/harpynet", "enabled" })
+    return rc == 0 and 1 or 0
+end
+
+local function sing_box_running()
+    local rc = run({ "/bin/pidof", "sing-box" })
+    if rc == 0 then
+        return 1
+    end
+
+    rc = run({ "/usr/bin/pgrep", "-f", "/usr/bin/sing-box run" })
+    return rc == 0 and 1 or 0
+end
+
+local function uci_get(config, section, option)
+    local _, output = run({ "uci", "-q", "get", config .. "." .. section .. "." .. option })
+    return first_line(output)
+end
+
+local function uci_get_list(section, option)
+    local _, output = run({ "uci", "-q", "get", "harpynet." .. section .. "." .. option })
+    local result = {}
+
+    for item in tostring(output or ""):gmatch("%S+") do
+        result[#result + 1] = item
+    end
+
+    return result
+end
+
+local function command_result(command, argv)
+    local rc, output = run(argv)
+    local success = json_success(output)
+    local benign_async_start = (command == "start" or command == "restart")
+        and tostring(output or ""):match("Start harpynet")
+        and tostring(output or ""):match("service_triggers start")
+    local latency_success = command == "test_latency"
+        and tostring(output or ""):match("^%s*{")
+        and not tostring(output or ""):match('"error"')
+    local ok = success == true or benign_async_start or latency_success or (success == nil and rc == 0)
+    return {
+        ok = ok,
+        success = ok,
+        rc = rc,
+        command = command,
+        output = output
+    }
+end
+
+function json_success(output)
+    local text = tostring(output or "")
+    if text:match('"success"%s*:%s*true') then
+        return true
+    end
+    if text:match('"success"%s*:%s*false') then
+        return false
+    end
+    return nil
+end
+
+local function normalize_flag(value)
+    if value == true or value == 1 or value == "1" or value == "true" then
+        return "1"
+    end
+    return "0"
+end
+
+local function normalize_option(value)
+    return tostring(value or ""):gsub("[%z\r]", "")
+end
+
+local function normalize_text(value)
+    return tostring(value or ""):gsub("%z", "")
+end
+
+local function split_text_list(value)
+    local result = {}
+
+    for item in tostring(value or ""):gmatch("[^\n, ]+") do
+        item = item:gsub("^%s+", ""):gsub("%s+$", "")
+        if item ~= "" then
+            result[#result + 1] = item
+        end
+    end
+
+    return result
+end
+
+local function set_option(section, option, value)
+    return run({ "uci", "set", "harpynet." .. section .. "." .. option .. "=" .. value })
+end
+
+local function replace_list(section, option, values)
+    run({ "uci", "-q", "delete", "harpynet." .. section .. "." .. option })
+
+    for _, value in ipairs(values or {}) do
+        if value ~= "" then
+            local rc = run({ "uci", "add_list", "harpynet." .. section .. "." .. option .. "=" .. value })
+            if rc ~= 0 then
+                return rc
+            end
+        end
+    end
+
+    return 0
+end
+
+local function valid_subscription_url(value)
+    return type(value) == "string"
+        and #value > 0
+        and #value <= 4096
+        and not value:find("[%z\r\n%s]")
+        and (value:match("^https://") or value:match("^http://"))
+end
+
+local function valid_connection_type(value)
+    return value == "proxy" or value == "full_proxy" or value == "full_proxy_bypass_ru" or value == "exclusion"
+end
+
+local function valid_list_type(value)
+    return value == "disabled" or value == "dynamic" or value == "text"
+end
+
+local function valid_proxy_tag(value)
+    return type(value) == "string"
+        and #value > 0
+        and #value <= 256
+        and not value:find("[%z\r\n]")
+end
+
+--[[
+    @method-type: call
+    @method-name: summary
+    @method-desc: Get HarpyNet summary
+--]]
+function M.summary()
+    local _, raw_status = run({ "/usr/bin/harpynet", "get_status" })
+    local _, version = run({ "/usr/bin/harpynet", "show_version" })
+    local _, metadata = run({ "/usr/bin/harpynet", "get_subscription_metadata", "main" })
+    local _, outbounds = run({ "/usr/bin/harpynet", "get_device_outbound_options", "main" })
+    local _, proxies = run({ "/usr/bin/harpynet", "clash_api", "get_proxies" })
+    local running = sing_box_running()
+    if running ~= 1 and tostring(proxies or ""):match('"proxies"') then
+        running = 1
+    end
+    local subscription_url = uci_get("harpynet", "main", "subscription_url")
+    local connection_type = uci_get("harpynet", "main", "connection_type")
+    local selected_outbound = uci_get("harpynet", "main", "selected_outbound")
+    local dashboard_payload = '{"selected_outbound":' .. json_string(selected_outbound) ..
+        ',"metadata":' .. json_string(first_line(metadata) ~= "" and metadata or "{}") ..
+        ',"outbounds":' .. json_string(first_line(outbounds) ~= "" and outbounds or '{"success":true,"outbounds":[]}') ..
+        ',"proxies":' .. json_string(first_line(proxies) ~= "" and proxies or "{}") .. '}'
+
+    return {
+        ok = true,
+        init_enabled = init_enabled(),
+        running = running,
+        raw_status = dashboard_payload,
+        version = first_line(version),
+        selected_outbound = selected_outbound,
+        has_subscription = subscription_url ~= "" and 1 or 0,
+        subscription_url = subscription_url,
+        dashboard_selected_outbound = selected_outbound,
+        dashboard_metadata = first_line(metadata) ~= "" and metadata or "{}",
+        dashboard_outbounds = first_line(outbounds) ~= "" and outbounds or '{"success":true,"outbounds":[]}',
+        dashboard_proxies = first_line(proxies) ~= "" and proxies or "{}",
+        dashboard = {
+            selected_outbound = selected_outbound,
+            metadata = first_line(metadata) ~= "" and metadata or "{}",
+            outbounds = first_line(outbounds) ~= "" and outbounds or '{"success":true,"outbounds":[]}',
+            proxies = first_line(proxies) ~= "" and proxies or "{}"
+        },
+        main = {
+            connection_type = connection_type ~= "" and connection_type or "proxy",
+            proxy_config_type = uci_get("harpynet", "main", "proxy_config_type"),
+            enable_udp_over_tcp = uci_get("harpynet", "main", "enable_udp_over_tcp"),
+            upstream_proxy_enabled = uci_get("harpynet", "main", "upstream_proxy_enabled"),
+            community_lists = uci_get_list("main", "community_lists"),
+            user_domain_list_type = uci_get("harpynet", "main", "user_domain_list_type"),
+            user_domains_text = uci_get("harpynet", "main", "user_domains_text"),
+            user_subnet_list_type = uci_get("harpynet", "main", "user_subnet_list_type"),
+            user_subnets_text = uci_get("harpynet", "main", "user_subnets_text"),
+            local_domain_lists = uci_get_list("main", "local_domain_lists"),
+            local_subnet_lists = uci_get_list("main", "local_subnet_lists"),
+            remote_domain_lists = uci_get_list("main", "remote_domain_lists"),
+            remote_subnet_lists = uci_get_list("main", "remote_subnet_lists"),
+            fully_routed_ips = uci_get_list("main", "fully_routed_ips"),
+            mixed_proxy_enabled = uci_get("harpynet", "main", "mixed_proxy_enabled"),
+            mixed_proxy_port = uci_get("harpynet", "main", "mixed_proxy_port"),
+            resolve_real_ip_for_routing = uci_get("harpynet", "main", "resolve_real_ip_for_routing")
+        }
+    }
+end
+
+function M.status()
+    return M.summary()
+end
+
+function M.version()
+    local _, version = run({ "/usr/bin/harpynet", "show_version" })
+    return { version = first_line(version) }
+end
+
+function M.logs(params)
+    if params and params.kind == "dashboard" then
+        local _, metadata = run({ "/usr/bin/harpynet", "get_subscription_metadata", "main" })
+        local _, outbounds = run({ "/usr/bin/harpynet", "get_device_outbound_options", "main" })
+        local _, proxies = run({ "/usr/bin/harpynet", "clash_api", "get_proxies" })
+
+        return {
+            logs = '{"selected_outbound":' .. json_string(uci_get("harpynet", "main", "selected_outbound")) ..
+                ',"metadata":' .. json_string(first_line(metadata) ~= "" and metadata or "{}") ..
+                ',"outbounds":' .. json_string(first_line(outbounds) ~= "" and outbounds or '{"success":true,"outbounds":[]}') ..
+                ',"proxies":' .. json_string(first_line(proxies) ~= "" and proxies or "{}") .. '}'
+        }
+    end
+
+    local _, output = run({ "sh", "-c", "logread 2>/dev/null | grep -i 'harpynet\\|sing-box' | tail -n 80" })
+    return { logs = output }
+end
+
+--[[
+    @method-type: call
+    @method-name: connections
+    @method-desc: Get active HarpyNet connections from Clash API
+--]]
+function M.connections()
+    local rc, output = run({ "/usr/bin/harpynet", "clash_api", "get_connections" })
+    if first_line(output) == "" then
+        output = '{"connections":[],"uploadTotal":0,"downloadTotal":0}'
+    end
+    return {
+        ok = true,
+        rc = rc,
+        json = output
+    }
+end
+
+--[[
+    @method-type: call
+    @method-name: dashboard
+    @method-desc: Get HarpyNet dashboard subscription metadata and outbounds
+--]]
+function M.dashboard()
+    local _, metadata = run({ "/usr/bin/harpynet", "get_subscription_metadata", "main" })
+    local _, outbounds = run({ "/usr/bin/harpynet", "get_device_outbound_options", "main" })
+    local _, proxies = run({ "/usr/bin/harpynet", "clash_api", "get_proxies" })
+
+    return {
+        ok = true,
+        selected_outbound = uci_get("harpynet", "main", "selected_outbound"),
+        metadata = first_line(metadata) ~= "" and metadata or "{}",
+        outbounds = first_line(outbounds) ~= "" and outbounds or '{"success":true,"outbounds":[]}',
+        proxies = first_line(proxies) ~= "" and proxies or "{}"
+    }
+end
+
+--[[
+    @method-type: call
+    @method-name: select_outbound
+    @method-desc: Select main subscription outbound through Clash API
+--]]
+function M.select_outbound(params)
+    local tag = params and params.tag or ""
+    if not valid_proxy_tag(tag) then
+        return { ok = false, error = "invalid_proxy_tag" }
+    end
+
+    return command_result("select_outbound", { "/usr/bin/harpynet", "clash_api", "set_group_proxy", "main-out", tag })
+end
+
+--[[
+    @method-type: call
+    @method-name: test_latency
+    @method-desc: Test latency for main selector outbounds
+--]]
+function M.test_latency()
+    return command_result("test_latency", { "/usr/bin/harpynet", "clash_api", "get_group_latency", "main-out", "8000" })
+end
+
+--[[
+    @method-type: call
+    @method-name: close_connection
+    @method-desc: Close one active HarpyNet connection
+--]]
+function M.close_connection(params)
+    local id = params and params.id or ""
+    if type(id) ~= "string" or id == "" or #id > 256 or id:find("[%z\r\n]") then
+        return { ok = false, error = "invalid_connection_id" }
+    end
+
+    return command_result("close_connection", { "/usr/bin/harpynet", "clash_api", "close_connection", id })
+end
+
+--[[
+    @method-type: call
+    @method-name: close_all_connections
+    @method-desc: Close all active HarpyNet connections
+--]]
+function M.close_all_connections()
+    return command_result("close_all_connections", { "/usr/bin/harpynet", "clash_api", "close_all_connections" })
+end
+
+--[[
+    @method-type: call
+    @method-name: set_subscription
+    @method-desc: Save HarpyNet subscription URL for the main section
+--]]
+function M.set_subscription(params)
+    local url = params and params.url or ""
+
+    if not valid_subscription_url(url) then
+        return {
+            ok = false,
+            error = "invalid_subscription_url"
+        }
+    end
+
+    local rc, output = run({
+        "/usr/bin/harpynet",
+        "save_subscription_url",
+        "main",
+        url,
+        "plain"
+    })
+    local success = json_success(output)
+
+    return {
+        ok = success == true or (success == nil and rc == 0),
+        rc = rc,
+        output = output
+    }
+end
+
+--[[
+    @method-type: call
+    @method-name: set_main_config
+    @method-desc: Save native GL.iNet HarpyNet main section settings
+--]]
+function M.set_main_config(params)
+    params = params or {}
+
+    local connection_type = normalize_option(params.connection_type)
+    local user_domain_list_type = normalize_option(params.user_domain_list_type)
+    local user_subnet_list_type = normalize_option(params.user_subnet_list_type)
+
+    if not valid_connection_type(connection_type) then
+        return { ok = false, error = "invalid_connection_type" }
+    end
+    if not valid_list_type(user_domain_list_type) then
+        return { ok = false, error = "invalid_user_domain_list_type" }
+    end
+    if not valid_list_type(user_subnet_list_type) then
+        return { ok = false, error = "invalid_user_subnet_list_type" }
+    end
+
+    set_option("main", "connection_type", connection_type)
+    set_option("main", "proxy_config_type", "subscription")
+    set_option("main", "enable_udp_over_tcp", normalize_flag(params.enable_udp_over_tcp))
+    set_option("main", "upstream_proxy_enabled", normalize_flag(params.upstream_proxy_enabled))
+    set_option("main", "user_domain_list_type", user_domain_list_type)
+    set_option("main", "user_domains_text", normalize_text(params.user_domains_text))
+    set_option("main", "user_subnet_list_type", user_subnet_list_type)
+    set_option("main", "user_subnets_text", normalize_text(params.user_subnets_text))
+    set_option("main", "mixed_proxy_enabled", normalize_flag(params.mixed_proxy_enabled))
+    set_option("main", "mixed_proxy_port", normalize_option(params.mixed_proxy_port))
+    set_option("main", "resolve_real_ip_for_routing", normalize_flag(params.resolve_real_ip_for_routing))
+
+    replace_list("main", "community_lists", split_text_list(params.community_lists))
+    replace_list("main", "local_domain_lists", split_text_list(params.local_domain_lists))
+    replace_list("main", "local_subnet_lists", split_text_list(params.local_subnet_lists))
+    replace_list("main", "remote_domain_lists", split_text_list(params.remote_domain_lists))
+    replace_list("main", "remote_subnet_lists", split_text_list(params.remote_subnet_lists))
+    replace_list("main", "fully_routed_ips", split_text_list(params.fully_routed_ips))
+
+    local rc, output = run({ "uci", "commit", "harpynet" })
+    if rc ~= 0 then
+        return { ok = false, rc = rc, error = "uci_commit_failed", output = output }
+    end
+
+    return { ok = true }
+end
+
+--[[
+    @method-type: call
+    @method-name: start
+    @method-desc: Start HarpyNet service
+--]]
+function M.start()
+    return command_result("start", { "/etc/init.d/harpynet", "start" })
+end
+
+--[[
+    @method-type: call
+    @method-name: stop
+    @method-desc: Stop HarpyNet service
+--]]
+function M.stop()
+    return command_result("stop", { "/etc/init.d/harpynet", "stop" })
+end
+
+--[[
+    @method-type: call
+    @method-name: restart
+    @method-desc: Restart HarpyNet service
+--]]
+function M.restart()
+    return command_result("restart", { "/etc/init.d/harpynet", "restart" })
+end
+
+--[[
+    @method-type: call
+    @method-name: enable
+    @method-desc: Enable HarpyNet autostart
+--]]
+function M.enable()
+    return command_result("enable", { "/etc/init.d/harpynet", "enable" })
+end
+
+--[[
+    @method-type: call
+    @method-name: disable
+    @method-desc: Disable HarpyNet autostart
+--]]
+function M.disable()
+    return command_result("disable", { "/etc/init.d/harpynet", "disable" })
+end
+
+--[[
+    @method-type: call
+    @method-name: subscription_update
+    @method-desc: Update HarpyNet subscription
+--]]
+function M.subscription_update()
+    return command_result("subscription_update", { "/usr/bin/harpynet", "subscription_update" })
+end
+
+return M

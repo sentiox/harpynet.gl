@@ -1,0 +1,173 @@
+#!/bin/sh
+
+json_escape() {
+	jq -Rs . 2>/dev/null
+}
+
+run_harpynet() {
+	/usr/bin/harpynet "$@" 2>&1
+}
+
+service_enabled() {
+	/etc/init.d/harpynet enabled >/dev/null 2>&1 && printf 1 || printf 0
+}
+
+service_running() {
+	pidof sing-box >/dev/null 2>&1 && printf 1 || printf 0
+}
+
+status_json() {
+	local raw enabled running version selected subscription
+	raw="$(run_harpynet get_status)"
+	enabled="$(service_enabled)"
+	running="$(service_running)"
+	version="$(run_harpynet show_version | head -n 1)"
+	selected="$(uci -q get harpynet.main.selected_outbound 2>/dev/null)"
+	subscription="$(uci -q get harpynet.main.subscription_url 2>/dev/null)"
+
+	jq -n \
+		--argjson init_enabled "$enabled" \
+		--argjson running "$running" \
+		--arg raw "$raw" \
+		--arg version "$version" \
+		--arg selected "$selected" \
+		--argjson has_subscription "$([ -n "$subscription" ] && printf 1 || printf 0)" \
+		--arg subscription "$subscription" \
+		'{
+			ok: true,
+			init_enabled: $init_enabled,
+			running: $running,
+			raw_status: $raw,
+			version: $version,
+			selected_outbound: $selected,
+			has_subscription: $has_subscription,
+			subscription_url: $subscription
+		}'
+}
+
+command_json() {
+	local command="$1" output rc
+	shift
+	output="$("$@" 2>&1)"
+	rc="$?"
+	jq -n \
+		--arg command "$command" \
+		--arg output "$output" \
+		--argjson rc "$rc" \
+		'{ok: (($rc == 0) or (($command == "start" or $command == "restart") and ($output | test("Start harpynet|service_triggers start"))) or ($command == "test_latency" and ($output | test("^\\\\s*\\\\{")) and ($output | test("\\\"error\\\"") | not))), rc: $rc, command: $command, output: $output}'
+}
+
+valid_subscription_url() {
+	case "$1" in
+		http://*|https://*) ;;
+		*) return 1 ;;
+	esac
+
+	[ -n "$1" ] && [ "${#1}" -le 4096 ] || return 1
+	printf '%s' "$1" | grep -q '[[:space:]]' && return 1
+	return 0
+}
+
+valid_proxy_tag() {
+	[ -n "$1" ] && [ "${#1}" -le 256 ] || return 1
+	printf '%s' "$1" | grep -q '[\r\n]' && return 1
+	return 0
+}
+
+set_subscription_json() {
+	local input="$1" url output rc
+	url="$(printf '%s' "$input" | jq -r '.url // empty' 2>/dev/null)"
+
+	if ! valid_subscription_url "$url"; then
+		printf '{ "ok": false, "error": "invalid_subscription_url" }\n'
+		return 1
+	fi
+
+	output="$(/usr/bin/harpynet save_subscription_url main "$url" plain 2>&1)"
+	rc="$?"
+	jq -n \
+		--arg output "$output" \
+		--argjson rc "$rc" \
+		'{ok: ($rc == 0), rc: $rc, command: "set_subscription", output: $output}'
+}
+
+select_outbound_json() {
+	local input="$1" tag
+	tag="$(printf '%s' "$input" | jq -r '.tag // empty' 2>/dev/null)"
+
+	if ! valid_proxy_tag "$tag"; then
+		printf '{ "ok": false, "error": "invalid_proxy_tag" }\n'
+		return 1
+	fi
+
+	command_json select_outbound /usr/bin/harpynet clash_api set_group_proxy main-out "$tag"
+}
+
+case "$1" in
+	list)
+		cat <<'JSON'
+{
+  "status": {},
+  "version": {},
+  "summary": {},
+  "logs": {},
+  "start": {},
+  "stop": {},
+  "restart": {},
+  "enable": {},
+  "disable": {},
+  "set_subscription": { "url": "String" },
+  "subscription_update": {},
+  "select_outbound": { "tag": "String" },
+  "test_latency": {}
+}
+JSON
+		;;
+	call)
+		read -r _input
+		case "$2" in
+			status|summary)
+				status_json
+				;;
+			version)
+				run_harpynet show_version | json_escape | sed 's/^/{ "version": /; s/$/ }/'
+				;;
+			logs)
+				logread 2>/dev/null | grep -i 'harpynet\|sing-box' | tail -n 80 | json_escape | sed 's/^/{ "logs": /; s/$/ }/'
+				;;
+			start)
+				command_json start /etc/init.d/harpynet start
+				;;
+			stop)
+				command_json stop /etc/init.d/harpynet stop
+				;;
+			restart)
+				command_json restart /etc/init.d/harpynet restart
+				;;
+			enable)
+				command_json enable /etc/init.d/harpynet enable
+				;;
+			disable)
+				command_json disable /etc/init.d/harpynet disable
+				;;
+			set_subscription)
+				set_subscription_json "$_input"
+				;;
+			subscription_update)
+				command_json subscription_update /usr/bin/harpynet subscription_update
+				;;
+			select_outbound)
+				select_outbound_json "$_input"
+				;;
+			test_latency)
+				command_json test_latency /usr/bin/harpynet clash_api get_group_latency main-out 8000
+				;;
+			*)
+				printf '{ "ok": false, "error": "unknown method" }\n'
+				;;
+		esac
+		;;
+	*)
+		printf '{ "ok": false, "error": "usage: %s list|call <method>" }\n' "$0"
+		;;
+esac
