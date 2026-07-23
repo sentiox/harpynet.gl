@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=harpynet-gl-ui
-PKG_VERSION:=0.1.0
+PKG_VERSION:=1.3.4
 PKG_RELEASE:=1
 PKG_MAINTAINER:=sentiox <harpynet@sentiox>
 PKG_LICENSE:=GPL-2.0-or-later
@@ -25,9 +25,13 @@ define Package/harpynet-gl-ui/install
 
 	$(INSTALL_DIR) $(1)/www/views
 	$(INSTALL_DATA) ./files/www/views/gl-sdk4-ui-harpynet.common.js $(1)/www/views/gl-sdk4-ui-harpynet.common.js
+	$(INSTALL_DATA) ./files/www/views/gl-sdk4-ui-internet.common.js.gz $(1)/www/views/gl-sdk4-ui-internet.common.js.gz
 
 	$(INSTALL_DIR) $(1)/www/harpynet/icons
 	$(INSTALL_DATA) ./files/www/harpynet/icons/*.png $(1)/www/harpynet/icons/
+
+	$(INSTALL_DIR) $(1)/www/harpynet/flags
+	$(INSTALL_DATA) ./files/www/harpynet/flags/*.png $(1)/www/harpynet/flags/
 
 	$(INSTALL_DIR) $(1)/usr/libexec/rpcd
 	$(INSTALL_BIN) ./files/usr/libexec/rpcd/harpynet_gl $(1)/usr/libexec/rpcd/harpynet_gl

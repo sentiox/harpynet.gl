@@ -30,6 +30,7 @@
           "set_subscription",
           "subscription_update",
           "set_main_config",
+          "check_upstream_proxy",
           "close_connection",
           "close_all_connections",
           "select_outbound",

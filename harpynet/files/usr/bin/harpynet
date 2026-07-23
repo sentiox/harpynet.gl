@@ -1646,6 +1646,7 @@ save_subscription_metadata() {
     local section="$1"
     local headers_file="$2"
     local metadata_file="/var/run/harpynet/subscription-$section.meta.json"
+    local persistent_metadata_file="/etc/harpynet/subscription-cache/subscription-$section.meta.json"
     local title userinfo web_page_url support_url announce announce_url refill_date
     local upload=0 download=0 total=0 expire=0 used=0 remaining=0
 
@@ -1706,7 +1707,7 @@ save_subscription_metadata() {
         remaining=$((total - used))
     fi
 
-    mkdir -p /var/run/harpynet
+    mkdir -p /var/run/harpynet /etc/harpynet/subscription-cache
     jq -n \
         --arg title "$title" \
         --arg webPageUrl "$web_page_url" \
@@ -1741,6 +1742,7 @@ save_subscription_metadata() {
         | with_entries(select(.value != "" and .value != 0))
         | if (.traffic.total == 0 and .traffic.used == 0) then del(.traffic) else . end
     ' > "$metadata_file"
+    cp "$metadata_file" "$persistent_metadata_file" 2>/dev/null || true
 }
 
 download_subscription_proxy_links() {
@@ -3431,10 +3433,15 @@ get_subscription_cache() {
 get_subscription_metadata() {
     local section="$1"
     local metadata_file="/var/run/harpynet/subscription-$section.meta.json"
+    local persistent_metadata_file="/etc/harpynet/subscription-cache/subscription-$section.meta.json"
 
     if ! echo "$section" | grep -Eq '^[A-Za-z0-9_-]+$'; then
         echo "{}"
         return 0
+    fi
+
+    if [ ! -s "$metadata_file" ] && [ -s "$persistent_metadata_file" ]; then
+        metadata_file="$persistent_metadata_file"
     fi
 
     if [ ! -s "$metadata_file" ]; then

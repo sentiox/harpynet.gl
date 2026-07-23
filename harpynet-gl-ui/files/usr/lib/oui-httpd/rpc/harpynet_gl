@@ -31,6 +31,10 @@ local function first_line(text)
     return (text or ""):match("([^\r\n]+)") or ""
 end
 
+local function trim(text)
+    return tostring(text or ""):match("^%s*(.-)%s*$") or ""
+end
+
 local function json_string(value)
     return '"' .. tostring(value or "")
         :gsub("\\", "\\\\")
@@ -40,6 +44,14 @@ local function json_string(value)
         :gsub("\n", "\\n")
         :gsub("\r", "\\r")
         :gsub("\t", "\\t") .. '"'
+end
+
+local function json_object(map)
+    local parts = {}
+    for key, value in pairs(map or {}) do
+        parts[#parts + 1] = json_string(key) .. ":" .. json_string(value)
+    end
+    return "{" .. table.concat(parts, ",") .. "}"
 end
 
 local function init_enabled()
@@ -71,6 +83,50 @@ local function uci_get_list(section, option)
     end
 
     return result
+end
+
+local function list_has(values, needle)
+    for _, value in ipairs(values or {}) do
+        if value == needle then
+            return true
+        end
+    end
+    return false
+end
+
+local function valid_ip(value)
+    if type(value) ~= "string" or not value:match("^%d+%.%d+%.%d+%.%d+$") then
+        return false
+    end
+
+    for octet in value:gmatch("%d+") do
+        local number = tonumber(octet)
+        if not number or number < 0 or number > 255 then
+            return false
+        end
+    end
+
+    return true
+end
+
+local function primary_proxy_section()
+    local _, output = run({ "sh", "-c", "uci show harpynet 2>/dev/null | sed -n \"s/^harpynet\\.\\([^.=]*\\)=section$/\\1/p\"" })
+    local fallback = ""
+
+    for section in tostring(output or ""):gmatch("[^\r\n]+") do
+        section = trim(section)
+        if section ~= "" then
+            if fallback == "" then
+                fallback = section
+            end
+            local connection_type = uci_get("harpynet", section, "connection_type")
+            if connection_type == "proxy" or connection_type == "full_proxy" or connection_type == "full_proxy_bypass_ru" then
+                return section
+            end
+        end
+    end
+
+    return fallback
 end
 
 local function command_result(command, argv)
@@ -166,6 +222,18 @@ local function valid_list_type(value)
     return value == "disabled" or value == "dynamic" or value == "text"
 end
 
+local function valid_dns_type(value)
+    return value == "udp" or value == "dot" or value == "doh"
+end
+
+local function valid_update_interval(value)
+    return value == "1h" or value == "3h" or value == "6h" or value == "12h" or value == "1d" or value == "3d"
+end
+
+local function valid_log_level(value)
+    return value == "trace" or value == "debug" or value == "info" or value == "warn" or value == "error" or value == "fatal" or value == "panic"
+end
+
 local function valid_proxy_tag(value)
     return type(value) == "string"
         and #value > 0
@@ -191,8 +259,9 @@ function M.summary()
     local subscription_url = uci_get("harpynet", "main", "subscription_url")
     local connection_type = uci_get("harpynet", "main", "connection_type")
     local selected_outbound = uci_get("harpynet", "main", "selected_outbound")
+    metadata = trim(metadata or "")
     local dashboard_payload = '{"selected_outbound":' .. json_string(selected_outbound) ..
-        ',"metadata":' .. json_string(first_line(metadata) ~= "" and metadata or "{}") ..
+        ',"metadata":' .. json_string(metadata ~= "" and metadata or "{}") ..
         ',"outbounds":' .. json_string(first_line(outbounds) ~= "" and outbounds or '{"success":true,"outbounds":[]}') ..
         ',"proxies":' .. json_string(first_line(proxies) ~= "" and proxies or "{}") .. '}'
 
@@ -206,12 +275,12 @@ function M.summary()
         has_subscription = subscription_url ~= "" and 1 or 0,
         subscription_url = subscription_url,
         dashboard_selected_outbound = selected_outbound,
-        dashboard_metadata = first_line(metadata) ~= "" and metadata or "{}",
+        dashboard_metadata = metadata ~= "" and metadata or "{}",
         dashboard_outbounds = first_line(outbounds) ~= "" and outbounds or '{"success":true,"outbounds":[]}',
         dashboard_proxies = first_line(proxies) ~= "" and proxies or "{}",
         dashboard = {
             selected_outbound = selected_outbound,
-            metadata = first_line(metadata) ~= "" and metadata or "{}",
+            metadata = metadata ~= "" and metadata or "{}",
             outbounds = first_line(outbounds) ~= "" and outbounds or '{"success":true,"outbounds":[]}',
             proxies = first_line(proxies) ~= "" and proxies or "{}"
         },
@@ -220,6 +289,15 @@ function M.summary()
             proxy_config_type = uci_get("harpynet", "main", "proxy_config_type"),
             enable_udp_over_tcp = uci_get("harpynet", "main", "enable_udp_over_tcp"),
             upstream_proxy_enabled = uci_get("harpynet", "main", "upstream_proxy_enabled"),
+            upstream_proxy_name = uci_get("harpynet", "main", "upstream_proxy_name"),
+            upstream_proxy_protocol = uci_get("harpynet", "main", "upstream_proxy_protocol"),
+            upstream_proxy_server = uci_get("harpynet", "main", "upstream_proxy_server"),
+            upstream_proxy_port = uci_get("harpynet", "main", "upstream_proxy_port"),
+            upstream_proxy_username = uci_get("harpynet", "main", "upstream_proxy_username"),
+            upstream_proxy_password = uci_get("harpynet", "main", "upstream_proxy_password"),
+            upstream_proxy_tls_server_name = uci_get("harpynet", "main", "upstream_proxy_tls_server_name"),
+            upstream_proxy_community_lists = uci_get_list("main", "upstream_proxy_community_lists"),
+            upstream_proxy_domains = uci_get("harpynet", "main", "upstream_proxy_domains"),
             community_lists = uci_get_list("main", "community_lists"),
             user_domain_list_type = uci_get("harpynet", "main", "user_domain_list_type"),
             user_domains_text = uci_get("harpynet", "main", "user_domains_text"),
@@ -233,6 +311,28 @@ function M.summary()
             mixed_proxy_enabled = uci_get("harpynet", "main", "mixed_proxy_enabled"),
             mixed_proxy_port = uci_get("harpynet", "main", "mixed_proxy_port"),
             resolve_real_ip_for_routing = uci_get("harpynet", "main", "resolve_real_ip_for_routing")
+        },
+        settings = {
+            dns_type = uci_get("harpynet", "settings", "dns_type"),
+            dns_server = uci_get("harpynet", "settings", "dns_server"),
+            bootstrap_dns_server = uci_get("harpynet", "settings", "bootstrap_dns_server"),
+            dns_rewrite_ttl = uci_get("harpynet", "settings", "dns_rewrite_ttl"),
+            source_network_interfaces = uci_get_list("settings", "source_network_interfaces"),
+            enable_output_network_interface = uci_get("harpynet", "settings", "enable_output_network_interface"),
+            output_network_interface = uci_get("harpynet", "settings", "output_network_interface"),
+            enable_badwan_interface_monitoring = uci_get("harpynet", "settings", "enable_badwan_interface_monitoring"),
+            badwan_monitored_interfaces = uci_get_list("settings", "badwan_monitored_interfaces"),
+            enable_yacd = uci_get("harpynet", "settings", "enable_yacd"),
+            disable_quic = uci_get("harpynet", "settings", "disable_quic"),
+            update_interval = uci_get("harpynet", "settings", "update_interval"),
+            subscription_update_interval = uci_get("harpynet", "settings", "subscription_update_interval"),
+            download_lists_via_proxy = uci_get("harpynet", "settings", "download_lists_via_proxy"),
+            dont_touch_dhcp = uci_get("harpynet", "settings", "dont_touch_dhcp"),
+            config_path = uci_get("harpynet", "settings", "config_path"),
+            cache_path = uci_get("harpynet", "settings", "cache_path"),
+            log_level = uci_get("harpynet", "settings", "log_level"),
+            exclude_ntp = uci_get("harpynet", "settings", "exclude_ntp"),
+            routing_excluded_ips = uci_get_list("settings", "routing_excluded_ips")
         }
     }
 end
@@ -251,10 +351,11 @@ function M.logs(params)
         local _, metadata = run({ "/usr/bin/harpynet", "get_subscription_metadata", "main" })
         local _, outbounds = run({ "/usr/bin/harpynet", "get_device_outbound_options", "main" })
         local _, proxies = run({ "/usr/bin/harpynet", "clash_api", "get_proxies" })
+        metadata = trim(metadata or "")
 
         return {
             logs = '{"selected_outbound":' .. json_string(uci_get("harpynet", "main", "selected_outbound")) ..
-                ',"metadata":' .. json_string(first_line(metadata) ~= "" and metadata or "{}") ..
+                ',"metadata":' .. json_string(metadata ~= "" and metadata or "{}") ..
                 ',"outbounds":' .. json_string(first_line(outbounds) ~= "" and outbounds or '{"success":true,"outbounds":[]}') ..
                 ',"proxies":' .. json_string(first_line(proxies) ~= "" and proxies or "{}") .. '}'
         }
@@ -283,6 +384,94 @@ end
 
 --[[
     @method-type: call
+    @method-name: devices
+    @method-desc: Get DHCP devices and saved per-device HarpyNet routing
+--]]
+function M.devices()
+    local _, devices = run({ "/usr/bin/harpynet", "get_dhcp_clients" })
+    local _, outbounds = run({ "/usr/bin/harpynet", "get_device_outbound_options" })
+    local proxy_section = primary_proxy_section()
+    local route_modes = {}
+    local device_outbounds = {}
+
+    local excluded = uci_get_list("settings", "routing_excluded_ips")
+    local routed = proxy_section ~= "" and uci_get_list(proxy_section, "fully_routed_ips") or {}
+    local bypass_ru = proxy_section ~= "" and uci_get_list(proxy_section, "bypass_ru_routed_ips") or {}
+    local outbound_entries = proxy_section ~= "" and uci_get_list(proxy_section, "device_outbounds") or {}
+
+    local known_ips = {}
+    for _, ip in ipairs(excluded) do
+        route_modes[ip] = "exclude"
+        known_ips[ip] = true
+    end
+    for _, ip in ipairs(bypass_ru) do
+        route_modes[ip] = "full_proxy_bypass_ru"
+        known_ips[ip] = true
+    end
+    for _, ip in ipairs(routed) do
+        if route_modes[ip] == nil then
+            route_modes[ip] = "full_proxy"
+        end
+        known_ips[ip] = true
+    end
+
+    for _, entry in ipairs(outbound_entries) do
+        local ip, tag = tostring(entry or ""):match("^([^=]+)=(.+)$")
+        if ip and tag and valid_ip(ip) then
+            device_outbounds[ip] = tag
+            known_ips[ip] = true
+        end
+    end
+
+    return {
+        ok = true,
+        devices = first_line(devices) ~= "" and devices or '{"clients":{},"devices":[]}',
+        outbounds = first_line(outbounds) ~= "" and outbounds or '{"success":true,"outbounds":[]}',
+        route_modes = json_object(route_modes),
+        device_outbounds = json_object(device_outbounds)
+    }
+end
+
+--[[
+    @method-type: call
+    @method-name: set_device_route
+    @method-desc: Set per-device routing mode
+--]]
+function M.set_device_route(params)
+    local ip = params and params.ip or ""
+    local mode = params and params.mode or ""
+
+    if not valid_ip(ip) then
+        return { ok = false, error = "invalid_ip" }
+    end
+    if mode ~= "default" and mode ~= "proxy" and mode ~= "full_proxy" and mode ~= "full_proxy_bypass_ru" and mode ~= "exclude" then
+        return { ok = false, error = "invalid_mode" }
+    end
+
+    return command_result("set_device_route", { "/usr/bin/harpynet", "set_device_route", ip, mode })
+end
+
+--[[
+    @method-type: call
+    @method-name: set_device_outbound
+    @method-desc: Set per-device subscription outbound
+--]]
+function M.set_device_outbound(params)
+    local ip = params and params.ip or ""
+    local outbound = params and params.outbound or "default"
+
+    if not valid_ip(ip) then
+        return { ok = false, error = "invalid_ip" }
+    end
+    if type(outbound) ~= "string" or outbound:find("[%z\r\n\t]") or #outbound > 180 then
+        return { ok = false, error = "invalid_outbound" }
+    end
+
+    return command_result("set_device_outbound", { "/usr/bin/harpynet", "set_device_outbound", ip, outbound ~= "" and outbound or "default" })
+end
+
+--[[
+    @method-type: call
     @method-name: dashboard
     @method-desc: Get HarpyNet dashboard subscription metadata and outbounds
 --]]
@@ -290,11 +479,12 @@ function M.dashboard()
     local _, metadata = run({ "/usr/bin/harpynet", "get_subscription_metadata", "main" })
     local _, outbounds = run({ "/usr/bin/harpynet", "get_device_outbound_options", "main" })
     local _, proxies = run({ "/usr/bin/harpynet", "clash_api", "get_proxies" })
+    metadata = trim(metadata or "")
 
     return {
         ok = true,
         selected_outbound = uci_get("harpynet", "main", "selected_outbound"),
-        metadata = first_line(metadata) ~= "" and metadata or "{}",
+        metadata = metadata ~= "" and metadata or "{}",
         outbounds = first_line(outbounds) ~= "" and outbounds or '{"success":true,"outbounds":[]}',
         proxies = first_line(proxies) ~= "" and proxies or "{}"
     }
@@ -403,6 +593,18 @@ function M.set_main_config(params)
     set_option("main", "proxy_config_type", "subscription")
     set_option("main", "enable_udp_over_tcp", normalize_flag(params.enable_udp_over_tcp))
     set_option("main", "upstream_proxy_enabled", normalize_flag(params.upstream_proxy_enabled))
+    set_option("main", "upstream_proxy_name", normalize_option(params.upstream_proxy_name))
+    local upstream_proxy_protocol = normalize_option(params.upstream_proxy_protocol)
+    if upstream_proxy_protocol == "" then
+        upstream_proxy_protocol = "http"
+    end
+    set_option("main", "upstream_proxy_protocol", upstream_proxy_protocol)
+    set_option("main", "upstream_proxy_server", normalize_option(params.upstream_proxy_server))
+    set_option("main", "upstream_proxy_port", normalize_option(params.upstream_proxy_port))
+    set_option("main", "upstream_proxy_username", normalize_option(params.upstream_proxy_username))
+    set_option("main", "upstream_proxy_password", normalize_option(params.upstream_proxy_password))
+    set_option("main", "upstream_proxy_tls_server_name", normalize_option(params.upstream_proxy_tls_server_name))
+    set_option("main", "upstream_proxy_domains", normalize_text(params.upstream_proxy_domains))
     set_option("main", "user_domain_list_type", user_domain_list_type)
     set_option("main", "user_domains_text", normalize_text(params.user_domains_text))
     set_option("main", "user_subnet_list_type", user_subnet_list_type)
@@ -412,11 +614,89 @@ function M.set_main_config(params)
     set_option("main", "resolve_real_ip_for_routing", normalize_flag(params.resolve_real_ip_for_routing))
 
     replace_list("main", "community_lists", split_text_list(params.community_lists))
+    replace_list("main", "upstream_proxy_community_lists", split_text_list(params.upstream_proxy_community_lists))
     replace_list("main", "local_domain_lists", split_text_list(params.local_domain_lists))
     replace_list("main", "local_subnet_lists", split_text_list(params.local_subnet_lists))
     replace_list("main", "remote_domain_lists", split_text_list(params.remote_domain_lists))
     replace_list("main", "remote_subnet_lists", split_text_list(params.remote_subnet_lists))
     replace_list("main", "fully_routed_ips", split_text_list(params.fully_routed_ips))
+
+    local rc, output = run({ "uci", "commit", "harpynet" })
+    if rc ~= 0 then
+        return { ok = false, rc = rc, error = "uci_commit_failed", output = output }
+    end
+
+    return { ok = true }
+end
+
+
+--[[
+    @method-type: call
+    @method-name: check_upstream_proxy
+    @method-desc: Check active upstream proxy from router
+--]]
+function M.check_upstream_proxy(params)
+    params = params or {}
+    local section = normalize_option(params.section)
+    if section == "" then
+        section = "main"
+    end
+    local rc, output = run({ "/usr/bin/harpynet", "check_upstream_proxy", section })
+    local success = json_success(output)
+    return {
+        ok = success == true or (success == nil and rc == 0),
+        rc = rc,
+        output = output
+    }
+end
+
+--[[
+    @method-type: call
+    @method-name: set_settings_config
+    @method-desc: Save native GL.iNet HarpyNet system settings
+--]]
+function M.set_settings_config(params)
+    params = params or {}
+
+    local dns_type = normalize_option(params.dns_type)
+    local update_interval = normalize_option(params.update_interval)
+    local subscription_update_interval = normalize_option(params.subscription_update_interval)
+    local log_level = normalize_option(params.log_level)
+
+    if not valid_dns_type(dns_type) then
+        return { ok = false, error = "invalid_dns_type" }
+    end
+    if not valid_update_interval(update_interval) then
+        return { ok = false, error = "invalid_update_interval" }
+    end
+    if not valid_update_interval(subscription_update_interval) then
+        return { ok = false, error = "invalid_subscription_update_interval" }
+    end
+    if not valid_log_level(log_level) then
+        return { ok = false, error = "invalid_log_level" }
+    end
+
+    set_option("settings", "dns_type", dns_type)
+    set_option("settings", "dns_server", normalize_option(params.dns_server))
+    set_option("settings", "bootstrap_dns_server", normalize_option(params.bootstrap_dns_server))
+    set_option("settings", "dns_rewrite_ttl", normalize_option(params.dns_rewrite_ttl))
+    set_option("settings", "enable_output_network_interface", normalize_flag(params.enable_output_network_interface))
+    set_option("settings", "output_network_interface", normalize_option(params.output_network_interface))
+    set_option("settings", "enable_badwan_interface_monitoring", normalize_flag(params.enable_badwan_interface_monitoring))
+    set_option("settings", "enable_yacd", normalize_flag(params.enable_yacd))
+    set_option("settings", "disable_quic", normalize_flag(params.disable_quic))
+    set_option("settings", "update_interval", update_interval)
+    set_option("settings", "subscription_update_interval", subscription_update_interval)
+    set_option("settings", "download_lists_via_proxy", normalize_flag(params.download_lists_via_proxy))
+    set_option("settings", "dont_touch_dhcp", normalize_flag(params.dont_touch_dhcp))
+    set_option("settings", "config_path", normalize_option(params.config_path))
+    set_option("settings", "cache_path", normalize_option(params.cache_path))
+    set_option("settings", "log_level", log_level)
+    set_option("settings", "exclude_ntp", normalize_flag(params.exclude_ntp))
+
+    replace_list("settings", "source_network_interfaces", split_text_list(params.source_network_interfaces))
+    replace_list("settings", "badwan_monitored_interfaces", split_text_list(params.badwan_monitored_interfaces))
+    replace_list("settings", "routing_excluded_ips", split_text_list(params.routing_excluded_ips))
 
     local rc, output = run({ "uci", "commit", "harpynet" })
     if rc ~= 0 then
