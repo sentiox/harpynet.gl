@@ -73,7 +73,7 @@ jobs:
           path: |
             ~/.cache/harpynet-gl/openwrt-sdk
             ./.build/sdk
-          key: harpynet-gl-openwrt-sdk-${{ runner.os }}-24.10.6-25.12.5
+          key: harpynet-gl-openwrt-sdk-${{ runner.os }}-24.10.6-25.12.3
 
       - name: Build release artifacts
         shell: bash

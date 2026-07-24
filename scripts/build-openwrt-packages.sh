@@ -21,7 +21,7 @@ SDK_WORK_DIR="${SDK_WORK_DIR:-$WORK_DIR/sdk}"
 OUTPUT_DIR="${OUTPUT_DIR_INPUT:-$ROOT_DIR/dist}"
 
 IPK_SDK_URL="${IPK_SDK_URL:-https://downloads.openwrt.org/releases/24.10.6/targets/x86/64/openwrt-sdk-24.10.6-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst}"
-APK_SDK_URL="${APK_SDK_URL:-https://downloads.openwrt.org/releases/25.12.5/targets/aarch64_cortex-a53/openwrt-sdk-25.12.5-aarch64_cortex-a53_gcc-14.3.0_musl.Linux-x86_64.tar.zst}"
+APK_SDK_URL="${APK_SDK_URL:-https://downloads.openwrt.org/releases/25.12.3/targets/x86/64/openwrt-sdk-25.12.3-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst}"
 
 PROJECT_URL="https://github.com/sentiox/harpynet.gl"
 MAINTAINER="sentiox <harpynet@sentiox>"
