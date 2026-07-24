@@ -25,7 +25,6 @@ define Package/harpynet-gl-ui/install
 
 	$(INSTALL_DIR) $(1)/www/views
 	$(INSTALL_DATA) ./files/www/views/gl-sdk4-ui-harpynet.common.js $(1)/www/views/gl-sdk4-ui-harpynet.common.js
-	$(INSTALL_DATA) ./files/www/views/gl-sdk4-ui-internet.common.js.gz $(1)/www/views/gl-sdk4-ui-internet.common.js.gz
 
 	$(INSTALL_DIR) $(1)/www/harpynet/icons
 	$(INSTALL_DATA) ./files/www/harpynet/icons/*.png $(1)/www/harpynet/icons/

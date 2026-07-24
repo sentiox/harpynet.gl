@@ -1,4 +1,7 @@
 _router_*
+.build/
+dist/
+.tmp-router/
 *.bak
 *.tmp
 *.swp

@@ -113,7 +113,6 @@ mkdir -p \
 
 cp "$UI/usr/share/oui/menu.d/harpynet.json" /usr/share/oui/menu.d/harpynet.json
 cp "$UI/www/views/gl-sdk4-ui-harpynet.common.js" /www/views/gl-sdk4-ui-harpynet.common.js
-[ -f "$UI/www/views/gl-sdk4-ui-internet.common.js.gz" ] && cp "$UI/www/views/gl-sdk4-ui-internet.common.js.gz" /www/views/gl-sdk4-ui-internet.common.js.gz
 cp "$UI/www/harpynet/icons/"*.png /www/harpynet/icons/
 cp "$UI/www/harpynet/flags/"*.png /www/harpynet/flags/
 cp "$UI/usr/lib/oui-httpd/rpc/harpynet_gl" /usr/lib/oui-httpd/rpc/harpynet_gl
@@ -122,7 +121,6 @@ cp "$UI/usr/libexec/rpcd/harpynet_gl" /usr/libexec/rpcd/harpynet_gl
 cp "$UI/usr/share/rpcd/acl.d/harpynet-gl.json" /usr/share/rpcd/acl.d/harpynet-gl.json
 chmod 0644 /usr/share/oui/menu.d/harpynet.json
 chmod 0644 /www/views/gl-sdk4-ui-harpynet.common.js
-[ -f /www/views/gl-sdk4-ui-internet.common.js.gz ] && chmod 0644 /www/views/gl-sdk4-ui-internet.common.js.gz
 chmod 0644 /www/harpynet/icons/*.png /www/harpynet/flags/*.png
 chmod 0644 /usr/lib/oui-httpd/rpc/harpynet_gl
 chmod 0644 /usr/share/gl-validator.d/harpynet_gl.lua
