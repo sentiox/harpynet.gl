@@ -1,10 +1,11 @@
 #!/bin/sh
 set -eu
 
-VERSION="${HARPYNET_VERSION:-1.3.5}"
+VERSION="${HARPYNET_VERSION:-1.3.6}"
 REF="${HARPYNET_REF:-v$VERSION}"
 REPO="${HARPYNET_REPO:-sentiox/harpynet.gl}"
 WORKDIR=""
+RUNTIME_PACKAGES="sing-box curl jq coreutils-base64 bind-dig kmod-nft-tproxy ca-bundle"
 
 info() {
 	printf '\033[32;1m%s\033[0m\n' "$*" >&2
@@ -43,6 +44,53 @@ extract_tarball() {
 		return 0
 	fi
 	fail "Could not extract repository archive"
+}
+
+package_manager() {
+	if command -v apk >/dev/null 2>&1; then
+		echo apk
+	elif command -v opkg >/dev/null 2>&1; then
+		echo opkg
+	else
+		fail "No supported package manager found: install apk or opkg first"
+	fi
+}
+
+package_installed() {
+	local manager="$1"
+	local pkg="$2"
+	if [ "$manager" = "apk" ]; then
+		apk info -e "$pkg" >/dev/null 2>&1
+	else
+		opkg list-installed "$pkg" >/dev/null 2>&1
+	fi
+}
+
+install_runtime_packages() {
+	local manager=""
+	local missing=""
+	local pkg=""
+
+	manager="$(package_manager)"
+	for pkg in $RUNTIME_PACKAGES; do
+		if ! package_installed "$manager" "$pkg"; then
+			missing="$missing $pkg"
+		fi
+	done
+
+	if [ -z "$missing" ]; then
+		info "Runtime packages already installed"
+		return 0
+	fi
+
+	info "Installing HarpyNet runtime packages:$missing"
+	if [ "$manager" = "apk" ]; then
+		apk update || warn "apk update failed, trying apk add anyway"
+		apk add $missing || fail "Could not install required packages:$missing"
+	else
+		opkg update || warn "opkg update failed, trying opkg install anyway"
+		opkg install $missing || fail "Could not install required packages:$missing"
+	fi
 }
 
 find_repo_root() {
@@ -85,6 +133,8 @@ UI="$ROOT/harpynet-gl-ui/files"
 
 [ -f "$CORE/usr/bin/harpynet" ] || fail "HarpyNet backend files not found"
 [ -f "$UI/www/views/gl-sdk4-ui-harpynet.common.js" ] || fail "HarpyNet GL UI files not found"
+
+install_runtime_packages
 
 info "Installing HarpyNet backend $VERSION..."
 mkdir -p /etc/init.d /etc/config /usr/bin /usr/lib/harpynet
