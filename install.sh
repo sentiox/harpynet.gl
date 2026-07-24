@@ -4,7 +4,6 @@ set -eu
 VERSION="${HARPYNET_VERSION:-1.3.5}"
 REF="${HARPYNET_REF:-v$VERSION}"
 REPO="${HARPYNET_REPO:-sentiox/harpynet.gl}"
-GITHUB_TOKEN="${HARPYNET_GITHUB_TOKEN:-${GITHUB_TOKEN:-${GH_TOKEN:-}}}"
 WORKDIR=""
 
 info() {
@@ -29,17 +28,9 @@ download() {
 	local url="$1"
 	local out="$2"
 	if command -v curl >/dev/null 2>&1; then
-		if [ -n "$GITHUB_TOKEN" ]; then
-			curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" "$url" -o "$out"
-		else
-			curl -fsSL "$url" -o "$out"
-		fi
+		curl -fsSL "$url" -o "$out"
 	elif command -v wget >/dev/null 2>&1; then
-		if [ -n "$GITHUB_TOKEN" ]; then
-			wget -q --header="Authorization: Bearer $GITHUB_TOKEN" -O "$out" "$url"
-		else
-			wget -q -O "$out" "$url"
-		fi
+		wget -q -O "$out" "$url"
 	else
 		fail "Install curl or wget first"
 	fi
