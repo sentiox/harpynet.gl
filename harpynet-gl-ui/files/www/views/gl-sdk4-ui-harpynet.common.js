@@ -1338,6 +1338,11 @@
             devices.push({ ip: ip, name: devicesPayload.clients[ip] || "Неизвестное устройство", connection: ip.match(/\.1$/) ? "Router" : "Ранее в сети" });
           });
         }
+        devices.forEach(function (device) {
+          var rememberedName = device && device.ip ? self.connectionDeviceNames[device.ip] : "";
+          if (rememberedName) device.name = rememberedName;
+          if (!device.name) device.name = "Неизвестное устройство";
+        });
         self.devices = devices.filter(function (device) { return device && device.ip && !self.isRouterDevice(device); }).sort(function (a, b) {
           return String(a.ip).localeCompare(String(b.ip), undefined, { numeric: true });
         });

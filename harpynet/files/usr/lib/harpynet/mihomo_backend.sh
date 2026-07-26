@@ -16,7 +16,7 @@ MIHOMO_MARK="0x100000"
 MIHOMO_BYPASS_MARK="0x200000"
 MIHOMO_TABLE="105"
 MIHOMO_TPROXY_PORT="1602"
-HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.9.1}"
+HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.9.2}"
 
 hn_log() {
     logger -t harpynet -- "$*"
@@ -113,7 +113,7 @@ hn_download_subscription() {
     model="$(ubus call system board 2>/dev/null | jq -r '.model // "OpenWrt router"')"
     os_version="$(. /etc/openwrt_release 2>/dev/null; printf '%s' "$DISTRIB_RELEASE")"
     version="$(opkg status harpynet 2>/dev/null | awk '/^Version:/{print $2; exit}')"
-    [ -n "$version" ] || version="1.3.9.1"
+    [ -n "$version" ] || version="1.3.9.2"
     wan_interface="$(hn_wan_interface)"
 
     set -- -fsSL --connect-timeout 15 --max-time 90 --retry 2
@@ -773,25 +773,78 @@ hn_apply_mode() {
 }
 
 hn_devices() {
-    local leases
+    local leases leases_json gl_clients
     leases="/tmp/dhcp.leases"
-    [ -f "$leases" ] || {
-        printf '%s\n' '{"clients":{},"devices":[]}'
-        return
-    }
-    awk 'NF>=4 {
-        printf "%s%s\t%s\t%s", (n++ ? "\n" : ""), $3, $2, $4
-    }' "$leases" | jq -Rsc '
-        split("\n") | map(select(length>0) | split("\t") |
+    leases_json="$(
+        awk 'NF>=4 {
+            printf "%s%s\t%s\t%s", (n++ ? "\n" : ""), $3, $2, $4
+        }' "$leases" 2>/dev/null | jq -Rsc '
+            split("\n") | map(select(length>0) | split("\t") | {
+                ip:.[0],
+                mac:.[1],
+                name:(.[2] | if .=="*" then "" else . end)
+            })'
+    )"
+    [ -n "$leases_json" ] || leases_json='[]'
+
+    gl_clients="$(
+        ubus call gl-clients list '{}' 2>/dev/null | jq -c '{
+            clients: ((.clients // {}) | with_entries(
+                .value |= {
+                    ip:(.ip // ""),
+                    mac:(.mac // ""),
+                    name:(.name // ""),
+                    iface:(.iface // ""),
+                    type:(.type // 0),
+                    online:(.online // false)
+                }
+            ))
+        }' 2>/dev/null
+    )"
+    [ -n "$gl_clients" ] || gl_clients='{"clients":{}}'
+
+    jq -nc --argjson gl "$gl_clients" --argjson leases "$leases_json" '
+        (reduce $leases[] as $lease ({}; .[$lease.ip] = $lease)) as $lease_by_ip |
+        ($gl.clients | to_entries | map(
+            .value as $client |
+            ($client.ip // "") as $ip |
+            ($client.iface | ascii_downcase) as $iface |
+            {
+                ip:$ip,
+                mac:(if ($client.mac // "") != "" then $client.mac else .key end),
+                hostname:($lease_by_ip[$ip].name // ""),
+                name:(if ($client.name // "") != "" then $client.name else ($lease_by_ip[$ip].name // "") end),
+                connection:(
+                    if $iface == "cable" then "LAN"
+                    elif $iface == "2.4g" or $iface == "2g" then "Wi-Fi 2.4"
+                    elif $iface == "5g" then "Wi-Fi 5G"
+                    else "Wi-Fi"
+                    end +
+                    (if $client.online then "" else " / не активно" end)
+                ),
+                online:$client.online
+            }
+        ) | map(select(.ip != ""))) as $gl_devices |
+        ($gl_devices | map(.ip)) as $gl_ips |
+        ($gl_devices + (
+            $leases | map(. as $lease | select(
+                $lease.ip != "" and (($gl_ips | index($lease.ip)) == null)
+            ) | {
+                ip:$lease.ip,
+                mac:$lease.mac,
+                hostname:$lease.name,
+                name:$lease.name,
+                connection:"DHCP / не активно",
+                online:false
+            })
+        ) | unique_by(.ip) | sort_by(.ip)) as $devices |
         {
-            ip:.[0],
-            mac:.[1],
-            hostname:(.[2] | if .=="*" then "" else . end),
-            name:(.[2] | if .=="*" then "Неизвестное устройство" else . end),
-            connection:"Wi-Fi",
-            online:true
-        }) as $d |
-        {clients:($d | map({key:.ip,value:.name}) | from_entries),devices:$d}'
+            clients:($devices | map({
+                key:.ip,
+                value:(if .name != "" then .name else "Неизвестное устройство" end)
+            }) | from_entries),
+            devices:$devices
+        }'
 }
 
 hn_remove_list_value() {
