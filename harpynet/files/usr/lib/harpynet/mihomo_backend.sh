@@ -8,12 +8,15 @@ MIHOMO_RAW="$MIHOMO_CACHE_DIR/mihomo-subscription.yaml"
 MIHOMO_SAVED="$MIHOMO_CACHE_DIR/mihomo-config.yaml"
 MIHOMO_HEADERS="$MIHOMO_CACHE_DIR/subscription.headers"
 MIHOMO_METADATA="$MIHOMO_CACHE_DIR/subscription-metadata.json"
+MIHOMO_GEOIP="$MIHOMO_DIR/geoip.metadb"
+MIHOMO_GEOIP_SAVED="$MIHOMO_CACHE_DIR/geoip.metadb"
+MIHOMO_GEOIP_URL="https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb"
 MIHOMO_API="http://127.0.0.1:9090"
 MIHOMO_MARK="0x100000"
 MIHOMO_BYPASS_MARK="0x200000"
 MIHOMO_TABLE="105"
 MIHOMO_TPROXY_PORT="1602"
-HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.9}"
+HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.9.1}"
 
 hn_log() {
     logger -t harpynet -- "$*"
@@ -28,6 +31,51 @@ hn_require() {
         hn_log "Required command is missing: $1"
         return 1
     }
+}
+
+hn_wan_interface() {
+    ip -4 route show table main default 2>/dev/null |
+        awk 'NR == 1 { for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit } }'
+}
+
+hn_valid_geodata() {
+    [ -s "$1" ] && [ "$(wc -c < "$1" 2>/dev/null)" -gt 1000000 ]
+}
+
+hn_prepare_geodata() {
+    local download_tmp wan_interface
+    mkdir -p "$MIHOMO_DIR" "$MIHOMO_CACHE_DIR"
+
+    if hn_valid_geodata "$MIHOMO_GEOIP"; then
+        hn_valid_geodata "$MIHOMO_GEOIP_SAVED" ||
+            cp "$MIHOMO_GEOIP" "$MIHOMO_GEOIP_SAVED"
+        return 0
+    fi
+    if hn_valid_geodata "$MIHOMO_GEOIP_SAVED"; then
+        cp "$MIHOMO_GEOIP_SAVED" "$MIHOMO_GEOIP"
+        return 0
+    fi
+
+    download_tmp="$MIHOMO_GEOIP_SAVED.new"
+    wan_interface="$(hn_wan_interface)"
+    rm -f "$download_tmp"
+    hn_log "Downloading Mihomo GeoIP database"
+    set -- -fsSL --connect-timeout 15 --max-time 120 --retry 3
+    [ -n "$wan_interface" ] && set -- "$@" --interface "$wan_interface"
+    curl "$@" \
+        -o "$download_tmp" "$MIHOMO_GEOIP_URL" || {
+        rm -f "$download_tmp"
+        hn_log "Failed to download Mihomo GeoIP database"
+        return 1
+    }
+    hn_valid_geodata "$download_tmp" || {
+        rm -f "$download_tmp"
+        hn_log "Downloaded Mihomo GeoIP database is invalid"
+        return 1
+    }
+    mv "$download_tmp" "$MIHOMO_GEOIP_SAVED"
+    chmod 0644 "$MIHOMO_GEOIP_SAVED"
+    cp "$MIHOMO_GEOIP_SAVED" "$MIHOMO_GEOIP"
 }
 
 hn_uci_get() {
@@ -52,7 +100,7 @@ hn_hwid() {
 }
 
 hn_download_subscription() {
-    local url tmp_headers tmp_yaml model os_version version
+    local url tmp_headers tmp_yaml model os_version version wan_interface
     url="$(hn_uci_get main subscription_url)"
     [ -n "$url" ] || {
         hn_log "Subscription URL is empty"
@@ -65,9 +113,12 @@ hn_download_subscription() {
     model="$(ubus call system board 2>/dev/null | jq -r '.model // "OpenWrt router"')"
     os_version="$(. /etc/openwrt_release 2>/dev/null; printf '%s' "$DISTRIB_RELEASE")"
     version="$(opkg status harpynet 2>/dev/null | awk '/^Version:/{print $2; exit}')"
-    [ -n "$version" ] || version="1.3.9"
+    [ -n "$version" ] || version="1.3.9.1"
+    wan_interface="$(hn_wan_interface)"
 
-    if ! curl -fL --connect-timeout 15 --max-time 90 --retry 2 \
+    set -- -fsSL --connect-timeout 15 --max-time 90 --retry 2
+    [ -n "$wan_interface" ] && set -- "$@" --interface "$wan_interface"
+    if ! curl "$@" \
         -D "$tmp_headers" -o "$tmp_yaml" \
         -H "User-Agent: ClashMeta/1.19.29 HarpyNet/$version/router" \
         -H "x-hwid: $(hn_hwid)" \
@@ -403,10 +454,13 @@ hn_prepare_config() {
     if [ ! -s "$MIHOMO_RAW" ]; then
         hn_download_subscription || return 1
     fi
+    if grep -qE '(^|[[:space:],])GEOIP,' "$MIHOMO_RAW"; then
+        hn_prepare_geodata || return 1
+    fi
 
     candidate="$MIHOMO_DIR/config.yaml.new"
     hn_patch_yaml "$MIHOMO_RAW" "$candidate" || return 1
-    if ! "$MIHOMO_BIN" -t -f "$candidate" >/tmp/harpynet-mihomo-check.log 2>&1; then
+    if ! "$MIHOMO_BIN" -d "$MIHOMO_DIR" -t -f "$candidate" >/tmp/harpynet-mihomo-check.log 2>&1; then
         hn_log "Mihomo rejected generated config: $(tail -n 3 /tmp/harpynet-mihomo-check.log)"
         rm -f "$candidate"
         return 1
@@ -417,6 +471,16 @@ hn_prepare_config() {
     hn_setup_policy || return 1
     hn_setup_dns || return 1
     return 0
+}
+
+hn_wait_api() {
+    local attempt
+    attempt=0
+    while ! hn_api GET /version >/dev/null 2>&1; do
+        attempt=$((attempt + 1))
+        [ "$attempt" -lt 20 ] || return 1
+        sleep 1
+    done
 }
 
 hn_apply_config() {
@@ -432,6 +496,10 @@ hn_apply_config() {
     hn_log "Mihomo hot reload failed, using service restart"
     /etc/init.d/harpynet restart >/dev/null 2>&1 || {
         hn_json_error "mihomo_reload_failed"
+        return 1
+    }
+    hn_wait_api || {
+        hn_json_error "mihomo_start_timeout"
         return 1
     }
     hn_apply_mode >/dev/null || return 1
@@ -780,7 +848,7 @@ hn_set_device_outbound() {
 hn_status() {
     local running version
     running=0
-    pidof mihomo >/dev/null 2>&1 && running=1
+    hn_api GET /version >/dev/null 2>&1 && running=1
     version="$("$MIHOMO_BIN" -v 2>/dev/null | head -n1)"
     jq -nc --argjson running "$running" --arg version "$version" \
         '{running:$running,backend:"mihomo",version:$version,config:"/tmp/mihomo/config.yaml"}'
@@ -823,8 +891,7 @@ hn_connection_failures() {
 
 hn_subscription_update() {
     hn_download_subscription &&
-        hn_prepare_config &&
-        /etc/init.d/harpynet restart
+        hn_apply_config
 }
 
 hn_save_subscription() {
@@ -859,6 +926,11 @@ harpynet_main() {
         set_device_outbound) hn_set_device_outbound "$@" ;;
         apply_mode) hn_apply_mode ;;
         apply_config) hn_apply_config ;;
+        prepare_geodata) hn_prepare_geodata && printf '%s\n' '{"success":true}' ;;
+        wait_ready) hn_wait_api && printf '%s\n' '{"success":true}' || {
+            hn_json_error "mihomo_start_timeout"
+            return 1
+        } ;;
         refresh_dns) hn_refresh_dns ;;
         save_subscription_url) hn_save_subscription "$@" ;;
         subscription_update) hn_subscription_update ;;

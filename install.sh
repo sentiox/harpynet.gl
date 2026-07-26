@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-VERSION="${HARPYNET_VERSION:-1.3.9}"
+VERSION="${HARPYNET_VERSION:-1.3.9.1}"
 REF="${HARPYNET_REF:-v$VERSION}"
 REPO="${HARPYNET_REPO:-sentiox/harpynet.gl}"
 WORKDIR=""
@@ -201,6 +201,9 @@ rmdir /usr/lib/harpynet/harpynet 2>/dev/null || true
 chmod 0755 /etc/init.d/harpynet /usr/bin/harpynet
 chmod 0644 /usr/lib/harpynet/*
 
+info "Preparing Mihomo GeoIP database..."
+/usr/bin/harpynet prepare_geodata >/dev/null || fail "Could not prepare Mihomo GeoIP database"
+
 if [ "$(uci -q get harpynet.settings.config_path)" = "/etc/sing-box/config.json" ]; then
 	uci set harpynet.settings.config_path="/tmp/mihomo/config.yaml"
 fi
@@ -238,7 +241,13 @@ chmod 0644 /usr/share/rpcd/acl.d/harpynet-gl.json
 
 info "Reloading services..."
 /etc/init.d/harpynet enable >/dev/null 2>&1 || true
-/etc/init.d/harpynet restart >/dev/null 2>&1 || fail "HarpyNet failed to start with Mihomo"
+if [ -n "$(uci -q get harpynet.main.subscription_url)" ]; then
+	/etc/init.d/harpynet restart >/dev/null 2>&1 || fail "HarpyNet failed to start with Mihomo"
+	/usr/bin/harpynet wait_ready >/dev/null || fail "Mihomo did not become ready"
+else
+	/etc/init.d/harpynet stop >/dev/null 2>&1 || true
+	info "HarpyNet is ready; add a subscription in the GL.iNet UI to start Mihomo"
+fi
 /etc/init.d/rpcd restart >/dev/null 2>&1 || warn "rpcd restart failed"
 /etc/init.d/oui-httpd restart >/dev/null 2>&1 || /etc/init.d/nginx reload >/dev/null 2>&1 || warn "OUI reload failed"
 
