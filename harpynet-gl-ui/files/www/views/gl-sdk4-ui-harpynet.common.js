@@ -2122,6 +2122,7 @@
       var selected = self.selectedProxyReadyLists();
       var query = String(self.proxyReadyListSearch || "").toLowerCase();
       var options = self.readyListOptions().filter(function (item) {
+        if (["ai_full", "chatgpt", "claude"].indexOf(item[0]) === -1) return false;
         return !query || (item[1] + " " + item[2]).toLowerCase().indexOf(query) !== -1;
       });
       return h("div", { staticClass: "hn-ready hn-ready-proxy" }, [
@@ -2172,7 +2173,7 @@
             ]);
           })),
           h("div", { staticClass: "hn-ready-footer" }, [
-            h("span", "Выбрано " + selected.length + " из " + self.readyListOptions().length),
+            h("span", "Выбрано " + selected.length + " из 3"),
             h("button", { staticClass: "hn-btn", attrs: { type: "button" }, on: { click: function () { self.setSelectedProxyReadyLists([]); } } }, "Очистить")
           ])
         ]) : null
@@ -2422,6 +2423,7 @@
         self.field(h, "Логин прокси", "Оставьте пустым, если авторизация не требуется.", self.inputField(h, "upstream_proxy_username", "")),
         self.field(h, "Пароль прокси", "Пароль не выводится в интерфейсе после ввода и не должен попадать в логи.", self.inputField(h, "upstream_proxy_password", "")),
         self.form.upstream_proxy_protocol === "https" ? self.field(h, "TLS server name", "Опциональное имя сервера. Нужно, если HTTPS-прокси требует отдельное SNI-имя.", self.inputField(h, "upstream_proxy_tls_server_name", "proxy.example.com")) : null,
+        self.field(h, "Готовые AI-списки", "Только AI Full, ChatGPT и Claude. Выбранные домены пойдут через этот отдельный прокси.", self.renderProxyReadyLists(h)),
         self.field(h, "Домены через прокси", "Дополнительные домены через прокси: по одному в строке либо через запятую. Указывайте без протокола.", self.textAreaField(h, "upstream_proxy_domains", "example.com\napi.example.com", 5)),
         h("div", { staticClass: "hn-savebar" }, [
           h("span", { staticClass: "hn-muted" }, self.formDirty ? "Есть несохранённые изменения" : "Настройки синхронизированы"),

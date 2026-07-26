@@ -13,7 +13,7 @@ MIHOMO_MARK="0x100000"
 MIHOMO_BYPASS_MARK="0x200000"
 MIHOMO_TABLE="105"
 MIHOMO_TPROXY_PORT="1602"
-HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.7}"
+HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.8}"
 
 hn_log() {
     logger -t harpynet -- "$*"
@@ -65,7 +65,7 @@ hn_download_subscription() {
     model="$(ubus call system board 2>/dev/null | jq -r '.model // "OpenWrt router"')"
     os_version="$(. /etc/openwrt_release 2>/dev/null; printf '%s' "$DISTRIB_RELEASE")"
     version="$(opkg status harpynet 2>/dev/null | awk '/^Version:/{print $2; exit}')"
-    [ -n "$version" ] || version="1.3.7"
+    [ -n "$version" ] || version="1.3.8"
 
     if ! curl -fL --connect-timeout 15 --max-time 90 --retry 2 \
         -D "$tmp_headers" -o "$tmp_yaml" \
@@ -114,9 +114,16 @@ hn_save_metadata() {
         > "$MIHOMO_METADATA"
 }
 
+hn_yaml_quote() {
+    jq -Rn --arg value "$1" '$value'
+}
+
 hn_patch_yaml() {
     local source target log_level fully_routed smart_routed bypass_ru
     local user_domain_type user_domains user_subnet_type user_subnets
+    local upstream_enabled upstream_name upstream_protocol upstream_server upstream_port
+    local upstream_username upstream_password upstream_sni upstream_domains upstream_lists
+    local upstream_ready_domains upstream_snippet upstream_list
     source="$1"
     target="$2"
     log_level="$(hn_uci_get settings log_level)"
@@ -135,10 +142,90 @@ hn_patch_yaml() {
     user_domains="$(hn_uci_get main user_domains_text)"
     user_subnet_type="$(hn_uci_get main user_subnet_list_type)"
     user_subnets="$(hn_uci_get main user_subnets_text)"
+    upstream_enabled="$(hn_uci_get main upstream_proxy_enabled)"
+    upstream_name="$(hn_uci_get main upstream_proxy_name)"
+    upstream_protocol="$(hn_uci_get main upstream_proxy_protocol)"
+    upstream_server="$(hn_uci_get main upstream_proxy_server)"
+    upstream_port="$(hn_uci_get main upstream_proxy_port)"
+    upstream_username="$(hn_uci_get main upstream_proxy_username)"
+    upstream_password="$(hn_uci_get main upstream_proxy_password)"
+    upstream_sni="$(hn_uci_get main upstream_proxy_tls_server_name)"
+    upstream_domains="$(hn_uci_get main upstream_proxy_domains)"
+    upstream_lists="$(hn_uci_get main upstream_proxy_community_lists)"
+    upstream_ready_domains=""
+    for upstream_list in $upstream_lists; do
+        case "$upstream_list" in
+            ai_full)
+                upstream_ready_domains="$upstream_ready_domains openai.com chatgpt.com oaistatic.com oaiusercontent.com anthropic.com claude.ai claudeusercontent.com gemini.google.com generativelanguage.googleapis.com aistudio.google.com perplexity.ai x.ai grok.com copilot.microsoft.com"
+                ;;
+            chatgpt)
+                upstream_ready_domains="$upstream_ready_domains openai.com chatgpt.com oaistatic.com oaiusercontent.com"
+                ;;
+            claude)
+                upstream_ready_domains="$upstream_ready_domains anthropic.com claude.ai claudeusercontent.com"
+                ;;
+        esac
+    done
+    upstream_snippet="$MIHOMO_DIR/upstream-proxy.yaml"
+    rm -f "$upstream_snippet"
+
+    case "$upstream_protocol" in
+        socks5|http|https) ;;
+        *) upstream_protocol="http" ;;
+    esac
+    [ -n "$upstream_name" ] || upstream_name="HarpyNet Proxy"
+    upstream_name="$(printf '%s' "$upstream_name" | tr ',' ' ')"
+    case "$upstream_port" in
+        ''|*[!0-9]*) upstream_enabled=0 ;;
+        *) [ "$upstream_port" -ge 1 ] 2>/dev/null && [ "$upstream_port" -le 65535 ] 2>/dev/null || upstream_enabled=0 ;;
+    esac
+    [ -n "$upstream_server" ] || upstream_enabled=0
+
+    if [ "$upstream_enabled" = 1 ]; then
+        {
+            printf '  - name: %s\n' "$(hn_yaml_quote "$upstream_name")"
+            [ "$upstream_protocol" = socks5 ] && printf '    type: socks5\n' || printf '    type: http\n'
+            printf '    server: %s\n' "$(hn_yaml_quote "$upstream_server")"
+            printf '    port: %s\n' "$upstream_port"
+            [ -n "$upstream_username" ] && printf '    username: %s\n' "$(hn_yaml_quote "$upstream_username")"
+            [ -n "$upstream_password" ] && printf '    password: %s\n' "$(hn_yaml_quote "$upstream_password")"
+            if [ "$upstream_protocol" = socks5 ]; then
+                printf '    udp: true\n'
+            elif [ "$upstream_protocol" = https ]; then
+                printf '    tls: true\n'
+                [ -n "$upstream_sni" ] && printf '    sni: %s\n' "$(hn_yaml_quote "$upstream_sni")"
+            fi
+        } > "$upstream_snippet"
+        chmod 600 "$upstream_snippet"
+    fi
 
     awk -v level="$log_level" -v fully_routed="$fully_routed" -v smart_routed="$smart_routed" -v bypass_ru="$bypass_ru" \
         -v user_domain_type="$user_domain_type" -v user_domains="$user_domains" \
-        -v user_subnet_type="$user_subnet_type" -v user_subnets="$user_subnets" '
+        -v user_subnet_type="$user_subnet_type" -v user_subnets="$user_subnets" \
+        -v upstream_enabled="$upstream_enabled" -v upstream_name="$upstream_name" \
+        -v upstream_domains="$upstream_domains" -v upstream_ready_domains="$upstream_ready_domains" \
+        -v upstream_snippet="$upstream_snippet" '
+        function print_upstream_domains(raw, lines, tokens, line_count, token_count, i, j, value) {
+            line_count = split(raw, lines, /\n/)
+            for (i = 1; i <= line_count; i++) {
+                sub(/\/\/.*/, "", lines[i])
+                gsub(/[,	\r]+/, " ", lines[i])
+                token_count = split(lines[i], tokens, /[ ]+/)
+                for (j = 1; j <= token_count; j++) {
+                    value = tokens[j]
+                    sub(/^https?:\/\//, "", value)
+                    sub(/\/.*$/, "", value)
+                    sub(/:[0-9]+$/, "", value)
+                    sub(/^\+\./, "", value)
+                    sub(/^\*\./, "", value)
+                    if (value ~ /^[A-Za-z0-9_.-]+$/ && value ~ /\./) {
+                        rule_key = "DOMAIN-SUFFIX," tolower(value)
+                        if (!seen_rule_key[rule_key]++)
+                            print "  - DOMAIN-SUFFIX," tolower(value) "," upstream_name
+                    }
+                }
+            }
+        }
         function print_user_domains(raw, lines, tokens, line_count, token_count, i, j, value) {
             line_count = split(raw, lines, /\n/)
             for (i = 1; i <= line_count; i++) {
@@ -202,9 +289,18 @@ hn_patch_yaml() {
             dns_listen = 1
             next
         }
+        /^proxies:[[:space:]]*$/ {
+            print
+            if (upstream_enabled == 1)
+                while ((getline proxy_line < upstream_snippet) > 0) print proxy_line
+            close(upstream_snippet)
+            next
+        }
         /^rules:[[:space:]]*$/ {
             in_rules = 1
             print
+            if (upstream_enabled == 1) print_upstream_domains(upstream_domains)
+            if (upstream_enabled == 1) print_upstream_domains(upstream_ready_domains)
             if (user_domain_type == "text") print_user_domains(user_domains)
             if (user_subnet_type == "text") print_user_subnets(user_subnets)
             count = split(fully_routed, ips, /[[:space:]]+/)
@@ -240,6 +336,62 @@ hn_patch_yaml() {
             if (in_dns && !dns_listen) print "  listen: 127.0.0.42:53"
         }
     ' "$source" > "$target"
+    rm -f "$upstream_snippet"
+}
+
+hn_check_upstream_proxy() {
+    local protocol server port username password name encoded_name api_result result latency wan_interface
+    protocol="$(hn_uci_get main upstream_proxy_protocol)"
+    server="$(hn_uci_get main upstream_proxy_server)"
+    port="$(hn_uci_get main upstream_proxy_port)"
+    username="$(hn_uci_get main upstream_proxy_username)"
+    password="$(hn_uci_get main upstream_proxy_password)"
+    name="$(hn_uci_get main upstream_proxy_name)"
+    [ -n "$name" ] || name="HarpyNet Proxy"
+    name="$(printf '%s' "$name" | tr ',' ' ')"
+
+    [ -n "$server" ] && [ -n "$port" ] || {
+        hn_json_error "proxy_not_configured"
+        return 1
+    }
+    command -v curl >/dev/null 2>&1 || {
+        hn_json_error "curl_not_installed"
+        return 1
+    }
+
+    encoded_name="$(hn_urlencode "$name")"
+    api_result="$(hn_api GET "/proxies/$encoded_name/delay?timeout=10000&url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204" 2>/dev/null)"
+    latency="$(printf '%s' "$api_result" | jq -r '.delay // empty' 2>/dev/null)"
+    if [ -n "$latency" ]; then
+        jq -nc --argjson latency_ms "$latency" '{success:true,latency_ms:$latency_ms}'
+        return 0
+    fi
+
+    case "$protocol" in
+        socks5)
+            set -- --socks5-hostname "$server:$port"
+            ;;
+        http)
+            set -- --proxy "http://$server:$port"
+            ;;
+        https)
+            set -- --proxy "https://$server:$port"
+            ;;
+        *)
+            hn_json_error "unsupported_proxy_protocol"
+            return 1
+            ;;
+    esac
+    [ -n "$username$password" ] && set -- "$@" --proxy-user "$username:$password"
+    wan_interface="$(ip -4 route show table main default 2>/dev/null | awk 'NR == 1 { for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit } }')"
+    [ -n "$wan_interface" ] && set -- "$@" --interface "$wan_interface"
+    result="$(curl "$@" --connect-timeout 8 --max-time 15 --silent --show-error \
+        --output /dev/null --write-out '%{time_total}' https://www.gstatic.com/generate_204 2>/dev/null)" || {
+        hn_json_error "proxy_unreachable"
+        return 1
+    }
+    latency="$(awk -v seconds="$result" 'BEGIN { printf "%d", (seconds * 1000) + 0.5 }')"
+    jq -nc --argjson latency_ms "${latency:-0}" '{success:true,latency_ms:$latency_ms}'
 }
 
 hn_prepare_config() {
@@ -711,7 +863,7 @@ harpynet_main() {
         save_subscription_url) hn_save_subscription "$@" ;;
         subscription_update) hn_subscription_update ;;
         clash_api) hn_clash_api "$@" ;;
-        check_upstream_proxy) printf '%s\n' '{"success":true,"backend":"mihomo"}' ;;
+        check_upstream_proxy) hn_check_upstream_proxy ;;
         *)
             hn_json_error "unknown_command:$command"
             return 1
