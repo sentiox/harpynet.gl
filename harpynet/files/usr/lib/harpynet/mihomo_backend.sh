@@ -13,7 +13,7 @@ MIHOMO_MARK="0x100000"
 MIHOMO_BYPASS_MARK="0x200000"
 MIHOMO_TABLE="105"
 MIHOMO_TPROXY_PORT="1602"
-HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.8}"
+HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.9}"
 
 hn_log() {
     logger -t harpynet -- "$*"
@@ -65,7 +65,7 @@ hn_download_subscription() {
     model="$(ubus call system board 2>/dev/null | jq -r '.model // "OpenWrt router"')"
     os_version="$(. /etc/openwrt_release 2>/dev/null; printf '%s' "$DISTRIB_RELEASE")"
     version="$(opkg status harpynet 2>/dev/null | awk '/^Version:/{print $2; exit}')"
-    [ -n "$version" ] || version="1.3.8"
+    [ -n "$version" ] || version="1.3.9"
 
     if ! curl -fL --connect-timeout 15 --max-time 90 --retry 2 \
         -D "$tmp_headers" -o "$tmp_yaml" \

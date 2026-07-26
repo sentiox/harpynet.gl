@@ -21,6 +21,10 @@
       settingsDirty: false,
       settingsForm: this.emptySettingsForm(),
       settingsComboOpen: "",
+      readyListsOpen: false,
+      readyListSearch: "",
+      proxyReadyListsOpen: false,
+      proxyReadyListSearch: "",
       subscriptionModalOpen: false,
       subscriptionUrl: "",
       subscriptionSaving: false,
@@ -121,7 +125,12 @@
     } catch (e) {}
     try {
       var savedClosed = window.localStorage ? JSON.parse(window.localStorage.getItem("harpynet-gl-closed-connections") || "[]") : [];
-      if (Array.isArray(savedClosed)) this.closedConnections = savedClosed.slice(0, 200);
+      var closedCutoff = Date.now() - 5 * 60 * 1000;
+      if (Array.isArray(savedClosed)) {
+        this.closedConnections = savedClosed.filter(function (item) {
+          return item && Number(item._closedAt || 0) >= closedCutoff;
+        }).slice(0, 200);
+      }
     } catch (_closedError) {}
     try {
       var savedDeviceNames = window.localStorage ? JSON.parse(window.localStorage.getItem("harpynet-gl-device-names") || "{}") : {};
@@ -1220,9 +1229,19 @@
       var date = new Date(expire * 1000);
       return date.toLocaleDateString("ru-RU") + " (" + this.subscriptionDaysLeft() + ")";
     },
+    pruneClosedConnections: function () {
+      var cutoff = Date.now() - 5 * 60 * 1000;
+      this.closedConnections = this.closedConnections.filter(function (item) {
+        return item && Number(item._closedAt || 0) >= cutoff;
+      }).slice(0, 200);
+      try {
+        if (window.localStorage) window.localStorage.setItem("harpynet-gl-closed-connections", JSON.stringify(this.closedConnections));
+      } catch (_historyPruneError) {}
+    },
     refreshConnections: function (silent) {
       var self = this;
       if (self.connectionsRefreshing) return Promise.resolve();
+      self.pruneClosedConnections();
       self.connectionsRefreshing = true;
       if (!silent) self.connectionsLoading = true;
       if (!silent) self.connectionsError = "";
@@ -1255,10 +1274,7 @@
             if (self.closedConnections.some(function (closed) { return closed.id === item.id; })) return;
             self.closedConnections.unshift(Object.assign({}, item, { _closed: true, _closedAt: closedAt }));
           });
-          self.closedConnections = self.closedConnections.slice(0, 200);
-          try {
-            if (window.localStorage) window.localStorage.setItem("harpynet-gl-closed-connections", JSON.stringify(self.closedConnections));
-          } catch (_historyError) {}
+          self.pruneClosedConnections();
         }
         self.connections = nextConnections;
         self.connectionsInitialized = true;
@@ -1492,7 +1508,7 @@
       var rule = String(connection.rulePayload || connection.rule || "").trim();
       var text = host + " " + rule.toLowerCase();
       var matched = [
-        ["telegram|t\\.me", "Telegram"],
+        ["telegram|t\\.me|(^|\\s)(149\\.154\\.|91\\.108\\.)", "Telegram"],
         ["discord", "Discord"],
         ["instagram", "Instagram"],
         ["facebook|fbcdn|fbsbx|whatsapp|meta", "Meta"],
@@ -1525,6 +1541,10 @@
         google_play: "Google Play"
       };
       if (ruleSet && names[ruleSet[1]]) return { name: names[ruleSet[1]], sub: "готовый список" };
+      if (connection && connection._failure) {
+        if (host && !/^[0-9a-f:.]+$/i.test(host)) return { name: host, sub: "домен сбоя" };
+        return { name: "Неизвестный IP", sub: host || "Домен не виден" };
+      }
       if (meta.destinationIP && !meta.host) return { name: "Неизвестный IP", sub: "Домен не виден" };
       if (/inbound=tproxy/i.test(rule)) return { name: "Неизвестно", sub: "Сервис не распознан" };
       var cleaned = rule.replace(/^geosite:/i, "").replace(/^geoip:/i, "").replace(/^rule-set:/i, "");
@@ -1666,7 +1686,9 @@
             h("tbody", rows.map(function (connection) {
               var hostInfo = self.connectionHostInfo(connection);
               var serviceInfo = self.connectionServiceInfo(connection);
-              if (connection._failure) serviceInfo = { name: "Сбой", sub: connection.error || "Соединение не установлено" };
+              if (connection._failure && connection.error) {
+                serviceInfo = { name: serviceInfo.name, sub: serviceInfo.sub + " · " + connection.error };
+              }
               return h("tr", [
                 h("td", { staticClass: "hn-conn-host" }, [
                   h("div", { staticClass: "hn-cell-main" }, hostInfo.title),
@@ -2562,6 +2584,7 @@
       h("style", ["@media(max-width:620px){.hn-ready-item{grid-template-columns:28px minmax(0,1fr)!important;gap:8px 10px;align-items:start;padding:9px 10px}.hn-ready-name{min-width:0}.hn-ready-desc{grid-column:2;white-space:normal;word-break:normal;overflow-wrap:normal;line-height:1.35}.hn-ready-items{max-height:420px}.hn-ready-footer{align-items:flex-start}.hn-ready-footer .hn-btn{flex:0 0 auto}}"]),
       h("style", [".hn-form-row{--hn-form-label-width:260px;--hn-form-gap:24px}.hn-value{white-space:nowrap}.hn-form-row:has(.hn-ready) .hn-ready{width:100%;max-width:none}.hn-form-row:has(.hn-ready) .hn-ready-panel{margin-left:calc((var(--hn-form-label-width) + var(--hn-form-gap))*-1);width:calc(100% + var(--hn-form-label-width) + var(--hn-form-gap))}.hn-textarea{width:100%;max-width:none;min-height:118px}.hn-caret{position:absolute;right:13px;top:50%;width:18px;height:18px;margin-top:-9px;color:var(--hn-text);opacity:.95;display:inline-flex;align-items:center;justify-content:center;transition:transform .16s ease,opacity .16s ease}.hn-caret:before{content:\"\";width:7px;height:7px;border-right:2px solid currentColor;border-bottom:2px solid currentColor;transform:rotate(45deg);margin-top:-3px}.hn-caret.open{transform:rotate(180deg)}.hn-ready-summary:hover .hn-caret{opacity:1;color:var(--hn-primary-2)}@media(max-width:980px){.hn-form-row:has(.hn-ready) .hn-ready-panel{margin-left:0;width:100%}}"]),
       h("style", [".hn-ready-summary{position:relative}.hn-ready-summary .hn-caret{top:50%;right:13px;margin-top:-9px}.hn-ready-summary.hn-combo-summary .hn-caret{right:13px}"]),
+      h("style", [".hn-form-row:has(.hn-ready-proxy) .hn-ready-proxy{width:min(100%,560px)!important;max-width:560px!important}.hn-form-row:has(.hn-ready-proxy) .hn-ready-proxy .hn-ready-panel{margin-left:0!important;width:100%!important;box-sizing:border-box}@media(max-width:980px){.hn-form-row:has(.hn-ready-proxy) .hn-ready-proxy{width:100%!important;max-width:none!important}}"]),
       h("style", [".hn-head{grid-template-columns:minmax(0,1fr) minmax(420px,520px);align-items:start}.hn-head-main{min-width:0}.hn-head-side{display:flex;flex-direction:column;gap:10px;min-width:0}.hn-head-sub{align-self:stretch;border:1px solid rgba(52,201,255,.22);background:linear-gradient(90deg,rgba(52,201,255,.08),rgba(52,201,255,.02));border-radius:8px;padding:12px 14px;box-shadow:0 10px 28px rgba(0,0,0,.08)}.hn-head-sub-title{display:flex;align-items:center;gap:8px;margin-bottom:9px;font-weight:800}.hn-head-sub-title span:first-child{color:var(--hn-primary-2);text-transform:uppercase;font-size:12px;letter-spacing:.04em}.hn-head-sub-main{display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:var(--hn-text);font-weight:700}.hn-head-sub-main .hn-pill{min-height:24px;padding:1px 9px}.hn-head-sub-line{margin-top:8px;color:var(--hn-soft);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.hn-grid{grid-template-columns:repeat(3,minmax(0,1fr))}@media(max-width:1050px){.hn-head{grid-template-columns:1fr}.hn-head-sub{width:auto}.hn-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:560px){.hn-grid{grid-template-columns:1fr}.hn-head-sub-line{white-space:normal}}"]),
       h("style", [".hn-head-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:0}.hn-mini-stat{min-height:34px;display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--hn-border);border-radius:8px;background:var(--hn-card);padding:7px 11px;box-shadow:0 8px 20px rgba(0,0,0,.06)}.hn-mini-label{font-size:12px;color:var(--hn-soft)}.hn-mini-value{font-size:14px;font-weight:800;color:var(--hn-text);white-space:nowrap}.hn-mini-stat .hn-badge{min-height:22px;padding:1px 8px}.hn-mini-version{font-size:18px}@media(max-width:560px){.hn-head-stats{grid-template-columns:1fr}.hn-mini-stat{justify-content:space-between}}"]),
       h("style", [".hn-head-sub{position:relative;padding-right:108px}.hn-head-sub-actions{position:absolute;right:10px;top:10px;display:flex;align-items:center;gap:6px}.hn-sub-refresh{width:30px;height:30px;border-radius:8px;border:1px solid rgba(52,201,255,.28);background:rgba(12,18,28,.36);color:var(--hn-primary-2);display:inline-flex;align-items:center;justify-content:center;cursor:pointer}.hn-sub-refresh:hover:not(:disabled){border-color:var(--hn-primary-2);background:rgba(52,201,255,.12)}.hn-sub-refresh:disabled{opacity:.7;cursor:not-allowed}.hn-refresh-svg{width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center}.hn-refresh-svg svg{width:18px;height:18px;display:block}.hn-refresh-svg path{fill:none;stroke:currentColor;stroke-width:2.35;stroke-linecap:round;stroke-linejoin:round}.hn-sub-refresh:hover .hn-refresh-svg{transform:rotate(20deg);transition:transform .16s ease}.hn-sub-refresh.loading{border-color:rgba(19,199,130,.55);color:#13c782;background:rgba(19,199,130,.08)}"]),
@@ -2585,9 +2608,8 @@
       h("div", { staticClass: "hn-head" }, [
         h("div", { staticClass: "hn-head-main" }, [
           h("div", { staticClass: "hn-title" }, "HarpyNet"),
-          h("div", { staticClass: "hn-sub" }, "Панель для основного интерфейса GL.iNet"),
+          h("div", { staticClass: "hn-sub" }, "Управление Mihomo и маршрутизацией трафика"),
           h("div", { staticClass: "hn-actions hn-top-actions" }, [
-            self.button(h, "Обновить", "summary", false),
             status.running ? self.button(h, "Остановить", "stop", false) : self.button(h, "Запустить", "start", true),
             self.button(h, "Перезапуск", "restart", false),
             status.init_enabled ? self.button(h, "Отключить автозапуск", "disable", false) : self.button(h, "Включить автозапуск", "enable", false)
