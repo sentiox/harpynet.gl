@@ -1,11 +1,11 @@
 #!/bin/sh
 set -eu
 
-VERSION="${HARPYNET_VERSION:-1.3.6}"
+VERSION="${HARPYNET_VERSION:-1.3.7}"
 REF="${HARPYNET_REF:-v$VERSION}"
 REPO="${HARPYNET_REPO:-sentiox/harpynet.gl}"
 WORKDIR=""
-RUNTIME_PACKAGES="sing-box curl jq coreutils-base64 bind-dig kmod-nft-tproxy ca-bundle"
+RUNTIME_PACKAGES="curl jq coreutils-base64 bind-dig kmod-nft-tproxy ca-bundle"
 
 info() {
 	printf '\033[32;1m%s\033[0m\n' "$*" >&2
@@ -93,6 +93,54 @@ install_runtime_packages() {
 	fi
 }
 
+install_mihomo() {
+	if command -v mihomo >/dev/null 2>&1 && mihomo -v >/dev/null 2>&1; then
+		info "Mihomo already installed: $(mihomo -v | head -n 1)"
+		return 0
+	fi
+
+	local machine=""
+	local arch=""
+	local release_json="/tmp/harpynet-mihomo-release.$$"
+	local archive="/tmp/harpynet-mihomo.gz.$$"
+	local tag=""
+	local asset=""
+	local url=""
+	local digest=""
+	local actual=""
+
+	machine="$(uname -m)"
+	case "$machine" in
+		aarch64|arm64) arch="arm64" ;;
+		armv7l|armv7) arch="armv7" ;;
+		armv6l|armv6) arch="armv6" ;;
+		x86_64|amd64) arch="amd64" ;;
+		i386|i486|i586|i686) arch="386" ;;
+		*) fail "Unsupported Mihomo architecture: $machine" ;;
+	esac
+
+	info "Downloading current Mihomo for linux-$arch..."
+	download "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" "$release_json"
+	tag="$(jq -r '.tag_name // empty' "$release_json")"
+	[ -n "$tag" ] || fail "Could not determine the current Mihomo release"
+	asset="mihomo-linux-${arch}-${tag}.gz"
+	url="$(jq -r --arg name "$asset" '.assets[] | select(.name == $name) | .browser_download_url' "$release_json" | head -n 1)"
+	digest="$(jq -r --arg name "$asset" '.assets[] | select(.name == $name) | (.digest // empty)' "$release_json" | head -n 1)"
+	[ -n "$url" ] || fail "Mihomo release does not contain $asset"
+
+	download "$url" "$archive"
+	if [ -n "$digest" ] && [ "${digest#sha256:}" != "$digest" ] && command -v sha256sum >/dev/null 2>&1; then
+		actual="$(sha256sum "$archive" | awk '{print $1}')"
+		[ "$actual" = "${digest#sha256:}" ] || fail "Mihomo checksum verification failed"
+	fi
+
+	gzip -dc "$archive" > /usr/bin/mihomo
+	chmod 0755 /usr/bin/mihomo
+	rm -f "$release_json" "$archive"
+	mihomo -v >/dev/null 2>&1 || fail "Installed Mihomo binary does not start"
+	info "Installed $(mihomo -v | head -n 1)"
+}
+
 find_repo_root() {
 	local base="$1"
 	find "$base" -maxdepth 2 -type f -name install.sh -exec dirname {} \; | head -n 1
@@ -135,6 +183,7 @@ UI="$ROOT/harpynet-gl-ui/files"
 [ -f "$UI/www/views/gl-sdk4-ui-harpynet.common.js" ] || fail "HarpyNet GL UI files not found"
 
 install_runtime_packages
+install_mihomo
 
 info "Installing HarpyNet backend $VERSION..."
 mkdir -p /etc/init.d /etc/config /usr/bin /usr/lib/harpynet
@@ -145,10 +194,20 @@ else
 	warn "Keeping existing /etc/config/harpynet"
 fi
 cp "$CORE/usr/bin/harpynet" /usr/bin/harpynet
-cp "$CORE/usr/lib/"* /usr/lib/harpynet/
-sed -i "s/__COMPILED_VERSION_VARIABLE__/$VERSION/g" /usr/lib/harpynet/constants.sh
+cp "$CORE/usr/lib/harpynet/"* /usr/lib/harpynet/
+rm -f /usr/lib/harpynet/sing_box_config_facade.sh /usr/lib/harpynet/sing_box_config_manager.sh
+rm -f /usr/lib/harpynet/harpynet/mihomo_backend.sh
+rmdir /usr/lib/harpynet/harpynet 2>/dev/null || true
 chmod 0755 /etc/init.d/harpynet /usr/bin/harpynet
 chmod 0644 /usr/lib/harpynet/*
+
+if [ "$(uci -q get harpynet.settings.config_path)" = "/etc/sing-box/config.json" ]; then
+	uci set harpynet.settings.config_path="/tmp/mihomo/config.yaml"
+fi
+if [ "$(uci -q get harpynet.settings.cache_path)" = "/etc/harpynet/cache.db" ]; then
+	uci set harpynet.settings.cache_path="/etc/harpynet/mihomo-config.yaml"
+fi
+uci commit harpynet
 
 info "Installing native GL.iNet UI..."
 mkdir -p \
@@ -179,6 +238,7 @@ chmod 0644 /usr/share/rpcd/acl.d/harpynet-gl.json
 
 info "Reloading services..."
 /etc/init.d/harpynet enable >/dev/null 2>&1 || true
+/etc/init.d/harpynet restart >/dev/null 2>&1 || fail "HarpyNet failed to start with Mihomo"
 /etc/init.d/rpcd restart >/dev/null 2>&1 || warn "rpcd restart failed"
 /etc/init.d/oui-httpd restart >/dev/null 2>&1 || /etc/init.d/nginx reload >/dev/null 2>&1 || warn "OUI reload failed"
 

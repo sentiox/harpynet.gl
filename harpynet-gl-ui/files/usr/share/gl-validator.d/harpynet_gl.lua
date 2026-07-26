@@ -2,6 +2,7 @@ return {
     status = {},
     summary = {},
     version = {},
+    mihomo_config = {},
     start = {},
     stop = {},
     restart = {},
@@ -15,6 +16,8 @@ return {
     },
     dashboard = {},
     devices = {},
+    connections = {},
+    close_all_connections = {},
     set_device_route = {
         ip = function(value)
             return type(value) == "string" and value:match("^%d+%.%d+%.%d+%.%d+$") ~= nil

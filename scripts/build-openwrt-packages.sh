@@ -27,9 +27,9 @@ PROJECT_URL="https://github.com/sentiox/harpynet.gl"
 MAINTAINER="sentiox <harpynet@sentiox>"
 BACKEND_DESCRIPTION="HarpyNet backend for GL.iNet routers"
 UI_DESCRIPTION="Native GL.iNet OUI interface for HarpyNet"
-BACKEND_DEPENDS_IPK="libc, sing-box, curl, jq, kmod-nft-tproxy, coreutils-base64, bind-dig"
+BACKEND_DEPENDS_IPK="libc, curl, jq, kmod-nft-tproxy, coreutils-base64, bind-dig"
 UI_DEPENDS_IPK="libc, harpynet, rpcd, jq"
-BACKEND_DEPENDS_APK="bind-dig coreutils-base64 curl jq kmod-nft-tproxy libc sing-box"
+BACKEND_DEPENDS_APK="bind-dig coreutils-base64 curl jq kmod-nft-tproxy libc"
 UI_DEPENDS_APK="harpynet jq libc rpcd"
 
 APT_PACKAGES=(
@@ -161,9 +161,7 @@ build_backend_root() {
   cp -a "$ROOT_DIR/harpynet/files/etc/init.d/harpynet" "$output_root/etc/init.d/harpynet"
   cp -a "$ROOT_DIR/harpynet/files/etc/config/harpynet" "$output_root/etc/config/harpynet"
   cp -a "$ROOT_DIR/harpynet/files/usr/bin/harpynet" "$output_root/usr/bin/harpynet"
-  cp -a "$ROOT_DIR/harpynet/files/usr/lib/." "$output_root/usr/lib/harpynet/"
-  sed -i -e "s/__COMPILED_VERSION_VARIABLE__/${RELEASE_VERSION}/g" \
-    "$output_root/usr/lib/harpynet/constants.sh"
+  cp -a "$ROOT_DIR/harpynet/files/usr/lib/harpynet/." "$output_root/usr/lib/harpynet/"
 
   normalize_package_root_modes "$output_root"
   chmod 0755 "$output_root/etc/init.d/harpynet" "$output_root/usr/bin/harpynet"

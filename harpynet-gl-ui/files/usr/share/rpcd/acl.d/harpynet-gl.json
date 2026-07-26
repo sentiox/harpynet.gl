@@ -9,7 +9,9 @@
           "summary",
           "logs",
           "dashboard",
-          "connections"
+          "connections",
+          "devices",
+          "mihomo_config"
         ],
         "session": [
           "access"
@@ -30,7 +32,10 @@
           "set_subscription",
           "subscription_update",
           "set_main_config",
+          "set_settings_config",
           "check_upstream_proxy",
+          "set_device_route",
+          "set_device_outbound",
           "close_connection",
           "close_all_connections",
           "select_outbound",

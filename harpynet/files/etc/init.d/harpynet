@@ -9,35 +9,27 @@ NAME="$(basename ${script:-$initscript})"
 config_load "$NAME"
 
 start_service() {
-    echo "Start harpynet"
-
-    config_get enable_badwan_interface_monitoring "settings" "enable_badwan_interface_monitoring"
-    config_get badwan_monitored_interfaces "settings" "badwan_monitored_interfaces"
+    /usr/bin/harpynet prepare || return 1
 
     procd_open_instance
-    procd_set_param command /usr/bin/harpynet start
-    [ "$enable_badwan_interface_monitoring" = "1" ] && [ -n "$badwan_monitored_interfaces" ] &&
-        procd_set_param netdev "$badwan_monitored_interfaces"
-    procd_set_param stdout 0
-    procd_set_param stderr 0
+    procd_set_param command /usr/bin/mihomo -d /tmp/mihomo
+    procd_set_param respawn 3600 5 5
+    procd_set_param file /tmp/mihomo/config.yaml
+    procd_set_param stdout 1
+    procd_set_param stderr 1
     procd_close_instance
 }
 
 stop_service() {
-    /usr/bin/harpynet stop
+    /usr/bin/harpynet cleanup
 }
 
 reload_service() {
-    /usr/bin/harpynet reload > /dev/null 2>&1
-}
-
-restart() {
-    /usr/bin/harpynet restart
+    stop
+    start
 }
 
 service_triggers() {
-    echo "service_triggers start"
-
     config_get enable_badwan_interface_monitoring "settings" "enable_badwan_interface_monitoring"
     config_get badwan_monitored_interfaces "settings" "badwan_monitored_interfaces"
     config_get badwan_reload_delay "settings" "badwan_reload_delay" "2000"
@@ -45,8 +37,6 @@ service_triggers() {
     PROCD_RELOAD_DELAY=$badwan_reload_delay
 
     procd_open_trigger
-    procd_add_config_trigger "config.change" "$NAME" "$initscript" restart 'on_config_change'
-
     if [ "$enable_badwan_interface_monitoring" = "1" ]; then
         for iface in $badwan_monitored_interfaces; do
             procd_add_interface_trigger "interface.*.up" "$iface" /etc/init.d/harpynet reload

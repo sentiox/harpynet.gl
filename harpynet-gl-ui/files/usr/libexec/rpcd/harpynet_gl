@@ -13,7 +13,7 @@ service_enabled() {
 }
 
 service_running() {
-	pidof sing-box >/dev/null 2>&1 && printf 1 || printf 0
+	pidof mihomo >/dev/null 2>&1 && printf 1 || printf 0
 }
 
 status_json() {
@@ -74,6 +74,20 @@ valid_proxy_tag() {
 	return 0
 }
 
+mihomo_config_json() {
+	local file
+	for file in /tmp/mihomo/config.yaml /etc/sentinel/mihomo-config.cache /etc/sentinel/mihomo-subscription.cache /etc/mihomo/config.yaml /etc/harpynet/mihomo.yaml /tmp/harpynet/mihomo.yaml; do
+		[ -s "$file" ] || continue
+		jq -n \
+			--arg path "$file" \
+			--arg config "$(cat "$file")" \
+			--argjson size "$(wc -c < "$file" 2>/dev/null | tr -d ' ')" \
+			'{ok: true, success: true, path: $path, size: $size, config: $config}'
+		return 0
+	done
+	printf '{ "ok": false, "success": false, "error": "mihomo config not found" }\n'
+}
+
 set_subscription_json() {
 	local input="$1" url output rc
 	url="$(printf '%s' "$input" | jq -r '.url // empty' 2>/dev/null)"
@@ -109,8 +123,11 @@ case "$1" in
 {
   "status": {},
   "version": {},
+  "mihomo_config": {},
   "summary": {},
   "logs": {},
+  "connections": {},
+  "devices": {},
   "start": {},
   "stop": {},
   "restart": {},
@@ -120,6 +137,7 @@ case "$1" in
   "subscription_update": {},
   "select_outbound": { "tag": "String" },
   "test_latency": {}
+  ,"close_all_connections": {}
 }
 JSON
 		;;
@@ -132,8 +150,20 @@ JSON
 			version)
 				run_harpynet show_version | json_escape | sed 's/^/{ "version": /; s/$/ }/'
 				;;
+			mihomo_config)
+				mihomo_config_json
+				;;
 			logs)
-				logread 2>/dev/null | grep -i 'harpynet\|sing-box' | tail -n 80 | json_escape | sed 's/^/{ "logs": /; s/$/ }/'
+				logread 2>/dev/null | grep -i 'harpynet\|mihomo' | tail -n 80 | json_escape | sed 's/^/{ "logs": /; s/$/ }/'
+				;;
+			connections)
+				run_harpynet clash_api get_connections | jq '{ok:true,json:(. | tojson)}'
+				;;
+			devices)
+				run_harpynet get_dhcp_clients | jq '{ok:true,devices:(. | tojson)}'
+				;;
+			close_all_connections)
+				command_json close_all_connections /usr/bin/harpynet clash_api close_all_connections
 				;;
 			start)
 				command_json start /etc/init.d/harpynet start

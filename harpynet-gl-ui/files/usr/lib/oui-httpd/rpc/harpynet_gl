@@ -35,6 +35,16 @@ local function trim(text)
     return tostring(text or ""):match("^%s*(.-)%s*$") or ""
 end
 
+local function read_file(path)
+    local file = io.open(path, "rb")
+    if not file then
+        return nil
+    end
+    local data = file:read("*a") or ""
+    file:close()
+    return data
+end
+
 local function json_string(value)
     return '"' .. tostring(value or "")
         :gsub("\\", "\\\\")
@@ -59,13 +69,8 @@ local function init_enabled()
     return rc == 0 and 1 or 0
 end
 
-local function sing_box_running()
-    local rc = run({ "/bin/pidof", "sing-box" })
-    if rc == 0 then
-        return 1
-    end
-
-    rc = run({ "/usr/bin/pgrep", "-f", "/usr/bin/sing-box run" })
+local function mihomo_running()
+    local rc = run({ "/bin/pidof", "mihomo" })
     return rc == 0 and 1 or 0
 end
 
@@ -175,16 +180,64 @@ local function normalize_text(value)
 end
 
 local function split_text_list(value)
-    local result = {}
+    local result, seen = {}, {}
 
     for item in tostring(value or ""):gmatch("[^\n, ]+") do
         item = item:gsub("^%s+", ""):gsub("%s+$", "")
-        if item ~= "" then
+        if item ~= "" and not seen[item] then
+            seen[item] = true
             result[#result + 1] = item
         end
     end
 
     return result
+end
+
+local function normalize_domain_list(value)
+    local result, seen = {}, {}
+
+    for line in tostring(value or ""):gmatch("[^\r\n]+") do
+        line = line:gsub("//.*$", ""):gsub(",", " ")
+        for item in line:gmatch("%S+") do
+            item = item:lower():gsub("^%+%.", ""):gsub("^%*%.", ""):gsub("%.$", "")
+            if item:match("^[%w_.-]+$") and item:find("%.", 1, false) and not seen[item] then
+                seen[item] = true
+                result[#result + 1] = item
+            end
+        end
+    end
+
+    return table.concat(result, "\n")
+end
+
+local function normalize_subnet_list(value)
+    local result, seen = {}, {}
+
+    for line in tostring(value or ""):gmatch("[^\r\n]+") do
+        line = line:gsub("//.*$", ""):gsub(",", " ")
+        for item in line:gmatch("%S+") do
+            item = item:lower()
+            local address, prefix = item:match("^([^/]+)/(%d+)$")
+            address = address or item
+            local canonical = item
+            local valid = false
+            if valid_ip(address) then
+                prefix = tonumber(prefix or "32")
+                valid = prefix >= 0 and prefix <= 32
+                canonical = address .. "/" .. prefix
+            elseif address:match("^[%x:]+$") and address:find(":", 1, true) then
+                prefix = tonumber(prefix or "128")
+                valid = prefix >= 0 and prefix <= 128
+                canonical = address .. "/" .. prefix
+            end
+            if valid and not seen[canonical] then
+                seen[canonical] = true
+                result[#result + 1] = canonical
+            end
+        end
+    end
+
+    return table.concat(result, "\n")
 end
 
 local function set_option(section, option, value)
@@ -252,7 +305,7 @@ function M.summary()
     local _, metadata = run({ "/usr/bin/harpynet", "get_subscription_metadata", "main" })
     local _, outbounds = run({ "/usr/bin/harpynet", "get_device_outbound_options", "main" })
     local _, proxies = run({ "/usr/bin/harpynet", "clash_api", "get_proxies" })
-    local running = sing_box_running()
+    local running = mihomo_running()
     if running ~= 1 and tostring(proxies or ""):match('"proxies"') then
         running = 1
     end
@@ -346,6 +399,36 @@ function M.version()
     return { version = first_line(version) }
 end
 
+function M.mihomo_config()
+    local paths = {
+        "/tmp/mihomo/config.yaml",
+        "/etc/sentinel/mihomo-config.cache",
+        "/etc/sentinel/mihomo-subscription.cache",
+        "/etc/mihomo/config.yaml",
+        "/etc/harpynet/mihomo.yaml",
+        "/tmp/harpynet/mihomo.yaml"
+    }
+
+    for _, path in ipairs(paths) do
+        local data = read_file(path)
+        if data and data ~= "" then
+            return {
+                ok = true,
+                success = true,
+                path = path,
+                size = #data,
+                config = data
+            }
+        end
+    end
+
+    return {
+        ok = false,
+        success = false,
+        error = "mihomo config not found"
+    }
+end
+
 function M.logs(params)
     if params and params.kind == "dashboard" then
         local _, metadata = run({ "/usr/bin/harpynet", "get_subscription_metadata", "main" })
@@ -361,7 +444,7 @@ function M.logs(params)
         }
     end
 
-    local _, output = run({ "sh", "-c", "logread 2>/dev/null | grep -i 'harpynet\\|sing-box' | tail -n 80" })
+    local _, output = run({ "sh", "-c", "logread 2>/dev/null | grep -i 'harpynet\\|mihomo' | tail -n 80" })
     return { logs = output }
 end
 
@@ -372,13 +455,17 @@ end
 --]]
 function M.connections()
     local rc, output = run({ "/usr/bin/harpynet", "clash_api", "get_connections" })
+    local _, failures = run({ "/usr/bin/harpynet", "get_connection_failures" })
+    local _, devices = run({ "/usr/bin/harpynet", "get_dhcp_clients" })
     if first_line(output) == "" then
         output = '{"connections":[],"uploadTotal":0,"downloadTotal":0}'
     end
     return {
         ok = true,
         rc = rc,
-        json = output
+        json = output,
+        failures = first_line(failures) ~= "" and failures or "[]",
+        devices = first_line(devices) ~= "" and devices or '{"devices":[]}'
     }
 end
 
@@ -396,6 +483,7 @@ function M.devices()
 
     local excluded = uci_get_list("settings", "routing_excluded_ips")
     local routed = proxy_section ~= "" and uci_get_list(proxy_section, "fully_routed_ips") or {}
+    local smart_routed = proxy_section ~= "" and uci_get_list(proxy_section, "smart_routed_ips") or {}
     local bypass_ru = proxy_section ~= "" and uci_get_list(proxy_section, "bypass_ru_routed_ips") or {}
     local outbound_entries = proxy_section ~= "" and uci_get_list(proxy_section, "device_outbounds") or {}
 
@@ -406,6 +494,10 @@ function M.devices()
     end
     for _, ip in ipairs(bypass_ru) do
         route_modes[ip] = "full_proxy_bypass_ru"
+        known_ips[ip] = true
+    end
+    for _, ip in ipairs(smart_routed) do
+        route_modes[ip] = "proxy"
         known_ips[ip] = true
     end
     for _, ip in ipairs(routed) do
@@ -606,9 +698,9 @@ function M.set_main_config(params)
     set_option("main", "upstream_proxy_tls_server_name", normalize_option(params.upstream_proxy_tls_server_name))
     set_option("main", "upstream_proxy_domains", normalize_text(params.upstream_proxy_domains))
     set_option("main", "user_domain_list_type", user_domain_list_type)
-    set_option("main", "user_domains_text", normalize_text(params.user_domains_text))
+    set_option("main", "user_domains_text", normalize_domain_list(params.user_domains_text))
     set_option("main", "user_subnet_list_type", user_subnet_list_type)
-    set_option("main", "user_subnets_text", normalize_text(params.user_subnets_text))
+    set_option("main", "user_subnets_text", normalize_subnet_list(params.user_subnets_text))
     set_option("main", "mixed_proxy_enabled", normalize_flag(params.mixed_proxy_enabled))
     set_option("main", "mixed_proxy_port", normalize_option(params.mixed_proxy_port))
     set_option("main", "resolve_real_ip_for_routing", normalize_flag(params.resolve_real_ip_for_routing))
@@ -626,7 +718,12 @@ function M.set_main_config(params)
         return { ok = false, rc = rc, error = "uci_commit_failed", output = output }
     end
 
-    return { ok = true }
+    local mode_rc, mode_output = run({ "/usr/bin/harpynet", "apply_config" })
+    if mode_rc ~= 0 then
+        return { ok = false, rc = mode_rc, error = "mihomo_config_apply_failed", output = mode_output }
+    end
+
+    return { ok = true, output = mode_output }
 end
 
 
@@ -703,7 +800,12 @@ function M.set_settings_config(params)
         return { ok = false, rc = rc, error = "uci_commit_failed", output = output }
     end
 
-    return { ok = true }
+    local dns_rc, dns_output = run({ "/usr/bin/harpynet", "refresh_dns" })
+    if dns_rc ~= 0 then
+        return { ok = false, rc = dns_rc, error = "dns_apply_failed", output = dns_output }
+    end
+
+    return { ok = true, output = dns_output }
 end
 
 --[[

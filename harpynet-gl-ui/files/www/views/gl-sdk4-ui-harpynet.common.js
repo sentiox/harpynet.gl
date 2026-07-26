@@ -24,24 +24,29 @@
       subscriptionModalOpen: false,
       subscriptionUrl: "",
       subscriptionSaving: false,
-      readyListsOpen: false,
-      readyListSearch: "",
-      proxyReadyListsOpen: false,
-      proxyReadyListSearch: "",
+      mihomoModalOpen: false,
+      mihomoConfigLoading: false,
+      mihomoConfigError: "",
+      mihomoConfig: null,
+      mihomoConfigSearch: "",
+      mihomoConfigSection: "all",
+      mihomoConfigWrap: false,
       connectionsLoading: false,
       connectionsError: "",
       connectionsSearch: "",
       connectionsMode: "active",
       connections: [],
+      closedConnections: [],
+      connectionFailures: [],
+      connectionsInitialized: false,
+      connectionDeviceNames: {},
       connectionsTotals: { upload: 0, download: 0 },
       devicesLoading: false,
       devicesError: "",
       devices: [],
       deviceOutbounds: [],
       deviceRouteModes: {},
-      deviceServerModes: {},
       devicePendingRoutes: {},
-      devicePendingServers: {},
       deviceFilter: "all",
       dashboardLoading: false,
       dashboardError: "",
@@ -64,6 +69,7 @@
       connectionsTimer: null,
       connectionsRefreshing: false,
       mainAutoSaveTimer: null,
+      mainAutoSaveKeys: [],
       mainAutoSaving: false
     };
   },
@@ -113,6 +119,14 @@
       var savedTab = window.localStorage ? window.localStorage.getItem("harpynet-gl-active-tab") : "";
       if (["sections", "proxy", "dashboard", "settings", "devices", "connections"].indexOf(savedTab) !== -1) this.activeTab = savedTab;
     } catch (e) {}
+    try {
+      var savedClosed = window.localStorage ? JSON.parse(window.localStorage.getItem("harpynet-gl-closed-connections") || "[]") : [];
+      if (Array.isArray(savedClosed)) this.closedConnections = savedClosed.slice(0, 200);
+    } catch (_closedError) {}
+    try {
+      var savedDeviceNames = window.localStorage ? JSON.parse(window.localStorage.getItem("harpynet-gl-device-names") || "{}") : {};
+      if (savedDeviceNames && typeof savedDeviceNames === "object") this.connectionDeviceNames = savedDeviceNames;
+    } catch (_deviceNamesError) {}
     this.loadCachedStatus();
     this.refresh();
   },
@@ -156,7 +170,7 @@
         upstream_proxy_tls_server_name: "",
         upstream_proxy_community_lists: "",
         upstream_proxy_domains: "",
-        community_lists: "russia_inside",
+        community_lists: "",
         user_domain_list_type: "disabled",
         user_domains_text: "",
         user_subnet_list_type: "disabled",
@@ -188,8 +202,8 @@
         subscription_update_interval: "12h",
         download_lists_via_proxy: "0",
         dont_touch_dhcp: "0",
-        config_path: "/etc/sing-box/config.json",
-        cache_path: "/etc/harpynet/cache.db",
+        config_path: "/tmp/mihomo/config.yaml",
+        cache_path: "/etc/harpynet/mihomo-config.yaml",
         log_level: "warn",
         exclude_ntp: "0",
         routing_excluded_ips: ""
@@ -467,18 +481,20 @@
     formValue: function (key, value, autoSave) {
       this.form[key] = value;
       if (autoSave) {
-        this.formDirty = false;
-        this.scheduleMainAutoSave();
+        this.scheduleMainAutoSave(key);
       } else {
         this.formDirty = true;
       }
     },
-    scheduleMainAutoSave: function () {
+    scheduleMainAutoSave: function (key) {
       var self = this;
+      if (self.mainAutoSaveKeys.indexOf(key) === -1) self.mainAutoSaveKeys.push(key);
       if (self.mainAutoSaveTimer) clearTimeout(self.mainAutoSaveTimer);
       self.mainAutoSaveTimer = setTimeout(function () {
+        var keys = self.mainAutoSaveKeys.slice();
+        self.mainAutoSaveKeys = [];
         self.mainAutoSaveTimer = null;
-        self.saveMainConfig({ silent: true, autosave: true });
+        self.saveMainConfig({ silent: true, autosave: true, keys: keys });
       }, 650);
     },
     settingsValue: function (key, value) {
@@ -492,7 +508,7 @@
       return this.settingsForm[key] === "1";
     },
     toggleFlag: function (key, checked) {
-      this.formValue(key, checked ? "1" : "0", true);
+      this.formValue(key, checked ? "1" : "0", key === "upstream_proxy_enabled");
       if (key === "upstream_proxy_enabled" && checked) {
         setTimeout(function () {
           if (this.form.upstream_proxy_enabled === "1") this.selectTab("proxy", 1);
@@ -536,13 +552,13 @@
       return String(this.form.community_lists || "").split(/\s+/).map(function (item) { return item.trim(); }).filter(Boolean);
     },
     setSelectedReadyLists: function (values) {
-      this.formValue("community_lists", values.join("\n"), true);
+      this.formValue("community_lists", values.join("\n"));
     },
     selectedProxyReadyLists: function () {
       return String(this.form.upstream_proxy_community_lists || "").split(/\s+/).map(function (item) { return item.trim(); }).filter(Boolean);
     },
     setSelectedProxyReadyLists: function (values) {
-      this.formValue("upstream_proxy_community_lists", values.join("\n"), true);
+      this.formValue("upstream_proxy_community_lists", values.join("\n"));
     },
     getReadyLabel: function (key) {
       var found = this.readyListOptions().find(function (item) { return item[0] === key; });
@@ -640,19 +656,40 @@
     saveMainConfig: function (options) {
       var self = this;
       options = options || {};
+      var autosaveKeys = Array.isArray(options.keys) ? options.keys : [];
+      var payload = self.form;
+      var draft = null;
+      var draftDirty = self.formDirty;
+      if (options.autosave) {
+        payload = self.emptyForm();
+        var saved = self.status && self.status.main ? self.status.main : {};
+        Object.keys(payload).forEach(function (key) {
+          var value = saved[key];
+          if (Array.isArray(value)) value = value.join("\n");
+          if (value !== undefined && value !== null && value !== "") payload[key] = String(value);
+        });
+        autosaveKeys.forEach(function (key) { payload[key] = self.form[key]; });
+        draft = Object.assign({}, self.form);
+      }
       if (self.mainAutoSaveTimer) {
         clearTimeout(self.mainAutoSaveTimer);
         self.mainAutoSaveTimer = null;
       }
+      if (!options.autosave) self.mainAutoSaveKeys = [];
       self.actionLoading = "set_main_config";
       self.mainAutoSaving = Boolean(options.autosave);
       self.error = "";
       if (!options.silent) self.notice = "";
-      return self.callApi("set_main_config", self.form).then(function (result) {
+      return self.callApi("set_main_config", payload).then(function (result) {
         if (result && result.ok === false) throw new Error(result.error || result.output || "Save failed");
         if (!options.silent) self.notice = "Настройки сохранены.";
-        self.formDirty = false;
-        return self.refresh();
+        if (!options.autosave) self.formDirty = false;
+        return self.refresh().then(function () {
+          if (options.autosave && draft) {
+            self.form = draft;
+            self.formDirty = draftDirty;
+          }
+        });
       }).catch(function (err) {
         self.error = err && err.message ? err.message : String(err);
       }).finally(function () {
@@ -800,6 +837,131 @@
         return fallback;
       }
     },
+    openMihomoConfig: function () {
+      this.mihomoModalOpen = true;
+      return this.loadMihomoConfig();
+    },
+    closeMihomoConfig: function () {
+      this.mihomoModalOpen = false;
+    },
+    loadMihomoConfig: function () {
+      var self = this;
+      self.mihomoConfigLoading = true;
+      self.mihomoConfigError = "";
+      return self.callApi("mihomo_config").then(function (result) {
+        var payload = result || {};
+        if (payload.reqData && payload.reqData.result) payload = payload.reqData.result;
+        if (payload.error) throw new Error(payload.error.message || payload.error || "Mihomo config failed");
+        if (payload.ok === false || payload.success === false) throw new Error(payload.error || payload.output || "Mihomo config not found");
+        self.mihomoConfig = payload;
+      }).catch(function (err) {
+        self.mihomoConfigError = err && err.message ? err.message : String(err);
+      }).finally(function () {
+        self.mihomoConfigLoading = false;
+      });
+    },
+    mihomoConfigStats: function () {
+      var config = this.mihomoConfig && this.mihomoConfig.config ? String(this.mihomoConfig.config) : "";
+      var lines = config ? config.split(/\r?\n/).length : 0;
+      var proxies = (config.match(/^\s*-\s*name\s*:/gm) || []).length;
+      var providers = 0;
+      var inProviders = false;
+      config.split(/\r?\n/).forEach(function (line) {
+        if (/^rule-providers\s*:/i.test(line)) {
+          inProviders = true;
+          return;
+        }
+        if (inProviders && /^[A-Za-z0-9_-]+:/.test(line)) inProviders = false;
+        if (inProviders && /^\s{2}[A-Za-z0-9_.-]+\s*:/.test(line)) providers += 1;
+      });
+      return {
+        lines: lines,
+        proxies: proxies,
+        providers: providers,
+        rules: (config.match(/^\s*-\s*(?:DOMAIN|IP|GEO|MATCH|RULE-SET|SRC-|DST-|PROCESS|NETWORK|AND|OR|NOT)/gm) || []).length,
+        size: this.prettyBytes(this.mihomoConfig && this.mihomoConfig.size ? this.mihomoConfig.size : config.length)
+      };
+    },
+    mihomoConfigOverview: function () {
+      var config = this.mihomoConfig && this.mihomoConfig.config ? String(this.mihomoConfig.config) : "";
+      var result = { groups: [], proxies: [], providers: [] };
+      var section = "";
+      config.split(/\r?\n/).forEach(function (line) {
+        var top = line.match(/^([A-Za-z][A-Za-z0-9_-]*):(?:\s|$)/);
+        if (top) section = top[1];
+        var name = line.match(/^\s{2}-\s*name:\s*(.+?)\s*$/);
+        if (name && section === "proxy-groups") result.groups.push(name[1].replace(/^['"]|['"]$/g, ""));
+        if (name && section === "proxies") result.proxies.push(name[1].replace(/^['"]|['"]$/g, ""));
+        var provider = line.match(/^\s{2}([A-Za-z0-9_.-]+)\s*:\s*$/);
+        if (provider && section === "rule-providers") result.providers.push(provider[1]);
+      });
+      return result;
+    },
+    mihomoConfigSections: function () {
+      var config = this.mihomoConfig && this.mihomoConfig.config ? String(this.mihomoConfig.config) : "";
+      var sections = [];
+      config.split(/\r?\n/).forEach(function (line) {
+        var match = line.match(/^([A-Za-z][A-Za-z0-9_-]*):(?:\s|$)/);
+        if (match && sections.indexOf(match[1]) === -1) sections.push(match[1]);
+      });
+      return sections;
+    },
+    mihomoVisibleConfig: function () {
+      var config = this.mihomoConfig && this.mihomoConfig.config ? String(this.mihomoConfig.config) : "";
+      var section = this.mihomoConfigSection || "all";
+      if (section !== "all") {
+        var lines = config.split(/\r?\n/);
+        var start = lines.findIndex(function (line) { return line.indexOf(section + ":") === 0; });
+        if (start >= 0) {
+          var end = lines.length;
+          for (var i = start + 1; i < lines.length; i += 1) {
+            if (/^[A-Za-z][A-Za-z0-9_-]*:(?:\s|$)/.test(lines[i])) { end = i; break; }
+          }
+          config = lines.slice(start, end).join("\n");
+        }
+      }
+      var query = String(this.mihomoConfigSearch || "").trim().toLowerCase();
+      if (!query) return config;
+      return config.split(/\r?\n/).filter(function (line) {
+        return line.toLowerCase().indexOf(query) !== -1;
+      }).join("\n");
+    },
+    copyMihomoConfig: function () {
+      var self = this;
+      var text = self.mihomoVisibleConfig();
+      var copied = function () {
+        self.error = "";
+        self.notice = "Конфигурация скопирована";
+      };
+      var failed = function () {
+        self.error = "Не удалось скопировать конфигурацию";
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(copied).catch(function () {
+          self.copyMihomoConfigFallback(text) ? copied() : failed();
+        });
+        return;
+      }
+      self.copyMihomoConfigFallback(text) ? copied() : failed();
+    },
+    copyMihomoConfigFallback: function (text) {
+      var area = document.createElement("textarea");
+      area.value = text;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.left = "-9999px";
+      document.body.appendChild(area);
+      area.select();
+      area.setSelectionRange(0, area.value.length);
+      var ok = false;
+      try {
+        ok = document.execCommand("copy");
+      } catch (_err) {
+        ok = false;
+      }
+      document.body.removeChild(area);
+      return ok;
+    },
     refreshDashboard: function () {
       var self = this;
       self.dashboardLoading = true;
@@ -887,7 +1049,7 @@
     dashboardSelectedOutbound: function () {
       var data = this.dashboard || {};
       var selected = data.selected || "";
-      var main = data.proxies && data.proxies["main-out"];
+      var main = data.proxies && (data.proxies["🌍 Страна"] || data.proxies["main-out"]);
       if (!selected && main && main.now) selected = main.now;
       return selected || "";
     },
@@ -984,7 +1146,10 @@
       });
     },
     dashboardMetadata: function () {
-      if (this.dashboard && this.dashboard.metadata) return this.dashboard.metadata;
+      if (this.dashboard && this.dashboard.metadata) {
+        var dashboardMetadata = this.parseJson(this.dashboard.metadata, this.dashboard.metadata);
+        if (dashboardMetadata && typeof dashboardMetadata === "object") return dashboardMetadata;
+      }
       if (this.status && this.status.dashboard_metadata) {
         var directMetadata = this.parseJson(this.status.dashboard_metadata, {});
         if (directMetadata && Object.keys(directMetadata).length) return directMetadata;
@@ -1032,14 +1197,21 @@
       if (line) return line.replace(/^📊\s*/, "");
       var metadata = this.dashboardMetadata();
       var traffic = metadata ? metadata.traffic : null;
-      return traffic ? this.prettyBytes(traffic.used || traffic.download || 0) : "0 B";
+      var used = traffic
+        ? Number(traffic.used || 0) || (Number(traffic.upload || 0) + Number(traffic.download || 0))
+        : (Number(metadata && metadata.upload || 0) + Number(metadata && metadata.download || 0));
+      return this.prettyBytes(used);
     },
     subscriptionTotalTraffic: function () {
       var metadata = this.dashboardMetadata();
       var traffic = metadata ? metadata.traffic : null;
-      if (!traffic) return "";
-      if (traffic.isUnlimited) return this.prettyBytes(traffic.used || 0) + " / ∞";
-      return this.prettyBytes(traffic.used || 0) + " / " + this.prettyBytes(traffic.total || 0);
+      var used = traffic
+        ? Number(traffic.used || 0) || (Number(traffic.upload || 0) + Number(traffic.download || 0))
+        : (Number(metadata && metadata.upload || 0) + Number(metadata && metadata.download || 0));
+      var total = Number(traffic ? traffic.total : metadata && metadata.total || 0);
+      if (!used && !total) return "";
+      if ((traffic && traffic.isUnlimited) || total === 0) return this.prettyBytes(used) + " / ∞";
+      return this.prettyBytes(used) + " / " + this.prettyBytes(total);
     },
     subscriptionExpireText: function () {
       var metadata = this.dashboardMetadata();
@@ -1062,7 +1234,40 @@
         } catch (err) {
           throw new Error("Clash API вернул не JSON: " + (err && err.message ? err.message : err));
         }
-        self.connections = Array.isArray(payload.connections) ? payload.connections : [];
+        var devicesPayload = self.parseJson(result && result.devices, { devices: [] });
+        (Array.isArray(devicesPayload.devices) ? devicesPayload.devices : []).forEach(function (device) {
+          if (device && device.ip && device.name) self.connectionDeviceNames[device.ip] = device.name;
+        });
+        try {
+          if (window.localStorage) window.localStorage.setItem("harpynet-gl-device-names", JSON.stringify(self.connectionDeviceNames));
+        } catch (_deviceMapError) {}
+        var nextConnections = Array.isArray(payload.connections) ? payload.connections : [];
+        nextConnections.forEach(function (item) {
+          var sourceIP = item && item.metadata ? (item.metadata.sourceIP || item.metadata.source) : "";
+          if (sourceIP && self.connectionDeviceNames[sourceIP]) item._sourceName = self.connectionDeviceNames[sourceIP];
+        });
+        if (self.connectionsInitialized) {
+          var nextIds = {};
+          nextConnections.forEach(function (item) { if (item && item.id) nextIds[item.id] = true; });
+          var closedAt = Date.now();
+          self.connections.forEach(function (item) {
+            if (!item || !item.id || nextIds[item.id] || self.isInfrastructureConnection(item)) return;
+            if (self.closedConnections.some(function (closed) { return closed.id === item.id; })) return;
+            self.closedConnections.unshift(Object.assign({}, item, { _closed: true, _closedAt: closedAt }));
+          });
+          self.closedConnections = self.closedConnections.slice(0, 200);
+          try {
+            if (window.localStorage) window.localStorage.setItem("harpynet-gl-closed-connections", JSON.stringify(self.closedConnections));
+          } catch (_historyError) {}
+        }
+        self.connections = nextConnections;
+        self.connectionsInitialized = true;
+        var failuresPayload = self.parseJson(result && result.failures, []);
+        self.connectionFailures = Array.isArray(failuresPayload) ? failuresPayload : [];
+        self.connectionFailures.forEach(function (item) {
+          var sourceIP = item && item.metadata ? (item.metadata.sourceIP || item.metadata.source) : "";
+          if (sourceIP && self.connectionDeviceNames[sourceIP]) item._sourceName = self.connectionDeviceNames[sourceIP];
+        });
         self.connectionsTotals = {
           upload: Number(payload.uploadTotal || 0),
           download: Number(payload.downloadTotal || 0)
@@ -1108,9 +1313,7 @@
       return self.callApi("devices").then(function (result) {
         if (result && result.ok === false) throw new Error(result.error || result.output || "Не удалось загрузить устройства");
         var devicesPayload = self.parseJson(result && result.devices, { devices: [], clients: {} });
-        var outboundPayload = self.parseJson(result && result.outbounds, { outbounds: [] });
         var routeModes = self.parseJson(result && result.route_modes, {});
-        var serverModes = self.parseJson(result && result.device_outbounds, {});
         var devices = [];
         if (Array.isArray(devicesPayload.devices) && devicesPayload.devices.length) {
           devices = devicesPayload.devices;
@@ -1122,13 +1325,9 @@
         self.devices = devices.filter(function (device) { return device && device.ip && !self.isRouterDevice(device); }).sort(function (a, b) {
           return String(a.ip).localeCompare(String(b.ip), undefined, { numeric: true });
         });
-        self.deviceOutbounds = (Array.isArray(outboundPayload.outbounds) ? outboundPayload.outbounds : []).filter(function (outbound) {
-          return outbound && outbound.tag && !self.hiddenDashboardOutbound(outbound);
-        });
+        self.deviceOutbounds = [];
         self.deviceRouteModes = routeModes || {};
-        self.deviceServerModes = serverModes || {};
         self.devicePendingRoutes = {};
-        self.devicePendingServers = {};
         if (!self.deviceFilterCounts()[self.deviceFilter]) self.deviceFilter = "all";
       }).catch(function (err) {
         self.devicesError = err && err.message ? err.message : String(err);
@@ -1203,30 +1402,18 @@
     deviceSavedRoute: function (ip) {
       return this.deviceRouteModes[ip] || "default";
     },
-    deviceSavedServer: function (ip) {
-      return this.deviceServerModes[ip] || "default";
-    },
     setDeviceRoutePending: function (ip, mode) {
       if (mode === this.deviceSavedRoute(ip)) this.$delete ? this.$delete(this.devicePendingRoutes, ip) : delete this.devicePendingRoutes[ip];
       else this.$set ? this.$set(this.devicePendingRoutes, ip, mode) : this.devicePendingRoutes[ip] = mode;
       this.devicePendingRoutes = Object.assign({}, this.devicePendingRoutes);
     },
-    setDeviceServerPending: function (ip, outbound) {
-      if (outbound === this.deviceSavedServer(ip)) this.$delete ? this.$delete(this.devicePendingServers, ip) : delete this.devicePendingServers[ip];
-      else this.$set ? this.$set(this.devicePendingServers, ip, outbound) : this.devicePendingServers[ip] = outbound;
-      this.devicePendingServers = Object.assign({}, this.devicePendingServers);
-    },
     devicePendingCount: function () {
-      var keys = {};
-      Object.keys(this.devicePendingRoutes).forEach(function (key) { keys[key] = true; });
-      Object.keys(this.devicePendingServers).forEach(function (key) { keys[key] = true; });
-      return Object.keys(keys).length;
+      return Object.keys(this.devicePendingRoutes).length;
     },
     applyDeviceChanges: function () {
       var self = this;
       var routes = Object.keys(self.devicePendingRoutes);
-      var servers = Object.keys(self.devicePendingServers);
-      if (!routes.length && !servers.length) return Promise.resolve();
+      if (!routes.length) return Promise.resolve();
       self.actionLoading = "devices_apply";
       self.devicesError = "";
       self.notice = "";
@@ -1235,13 +1422,6 @@
         chain = chain.then(function () {
           return self.callApi("set_device_route", { ip: ip, mode: self.devicePendingRoutes[ip] }).then(function (result) {
             if (result && result.ok === false) throw new Error(result.output || result.error || "Не удалось сохранить режим");
-          });
-        });
-      });
-      servers.forEach(function (ip) {
-        chain = chain.then(function () {
-          return self.callApi("set_device_outbound", { ip: ip, outbound: self.devicePendingServers[ip] }).then(function (result) {
-            if (result && result.ok === false) throw new Error(result.output || result.error || "Не удалось сохранить сервер");
           });
         });
       });
@@ -1294,11 +1474,13 @@
     },
     connectionRoute: function (connection) {
       var chain = Array.isArray(connection.chains) ? connection.chains : [];
-      for (var i = chain.length - 1; i >= 0; i -= 1) {
+      if (chain.indexOf("DIRECT") !== -1) return "🇷🇺 Россия · Без VPN";
+      for (var i = 0; i < chain.length; i += 1) {
         var item = String(chain[i] || "");
-        if (item && item !== "DIRECT" && item !== "REJECT" && item.indexOf("out") === -1) return item;
+        if (!item || item === "REJECT" || item === "GLOBAL" || item.indexOf("out") !== -1) continue;
+        if (/^(?:🔁\s*)?Режим$|^(?:🧠\s*)?Умный обход$|^(?:🔒\s*)?Полный VPN$|^(?:🌍\s*)?Страна$/i.test(item)) continue;
+        return item;
       }
-      if (chain.indexOf("DIRECT") !== -1) return "Без VPN";
       return chain[0] || "-";
     },
     connectionService: function (connection) {
@@ -1350,7 +1532,26 @@
     },
     connectionSource: function (connection) {
       var meta = connection.metadata || {};
-      return meta.sourceIP || meta.source || "-";
+      var ip = meta.sourceIP || meta.source || "-";
+      var name = connection._sourceName || this.connectionDeviceNames[ip] || "";
+      return name ? name + " · " + ip : ip;
+    },
+    copyConnectionHost: function (connection) {
+      var self = this;
+      var meta = connection && connection.metadata ? connection.metadata : {};
+      var value = String(meta.host || meta.destinationIP || meta.remoteDestination || "").trim();
+      if (!value) return;
+      var copied = function () {
+        self.error = "";
+        self.notice = "Скопировано: " + value;
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(value).then(copied).catch(function () {
+          if (self.copyMihomoConfigFallback(value)) copied();
+        });
+      } else if (self.copyMihomoConfigFallback(value)) {
+        copied();
+      }
     },
     connectionAge: function (connection) {
       if (!connection.start) return "-";
@@ -1364,20 +1565,34 @@
       return minutes + ":" + String(rest).padStart(2, "0");
     },
     connectionKind: function (connection) {
+      if (connection && connection._failure) return "failure";
       var route = this.connectionRoute(connection);
-      if (route === "Без VPN" || route === "DIRECT") return "direct";
+      if (route === "DIRECT" || route.indexOf("Без VPN") !== -1) return "direct";
       if (/reject|fail|timeout|сбой/i.test(route + " " + (connection.rule || ""))) return "failure";
       return "proxy";
+    },
+    isInfrastructureConnection: function (connection) {
+      var meta = connection && connection.metadata ? connection.metadata : {};
+      var host = String(meta.host || "").toLowerCase().replace(/\.$/, "");
+      return /^eu-[a-z0-9-]+\.harpynet\.com$/.test(host);
+    },
+    visibleConnections: function () {
+      var self = this;
+      return self.connections.filter(function (connection) {
+        return !self.isInfrastructureConnection(connection);
+      });
     },
     filteredConnections: function () {
       var self = this;
       var query = String(self.connectionsSearch || "").toLowerCase();
-      return self.connections.filter(function (connection) {
+      var source = self.connectionsMode === "closed"
+        ? self.closedConnections
+        : (self.connectionsMode === "failure" ? self.connectionFailures : self.visibleConnections());
+      return source.filter(function (connection) {
         var kind = self.connectionKind(connection);
         if (self.connectionsMode === "proxy" && kind !== "proxy") return false;
         if (self.connectionsMode === "direct" && kind !== "direct") return false;
         if (self.connectionsMode === "failure" && kind !== "failure") return false;
-        if (self.connectionsMode === "closed") return false;
         if (!query) return true;
         var text = [
           self.connectionHost(connection),
@@ -1391,17 +1606,19 @@
     },
     renderConnections: function (h) {
       var self = this;
-      var active = self.connections.length;
-      var proxy = self.connections.filter(function (item) { return self.connectionKind(item) === "proxy"; }).length;
-      var direct = self.connections.filter(function (item) { return self.connectionKind(item) === "direct"; }).length;
-      var failure = self.connections.filter(function (item) { return self.connectionKind(item) === "failure"; }).length;
+      var visibleConnections = self.visibleConnections();
+      var active = visibleConnections.length;
+      var proxy = visibleConnections.filter(function (item) { return self.connectionKind(item) === "proxy"; }).length;
+      var direct = visibleConnections.filter(function (item) { return self.connectionKind(item) === "direct"; }).length;
+      var failure = self.connectionFailures.length;
+      var closed = self.closedConnections.length;
       var rows = self.filteredConnections();
       var filters = [
         ["active", "Активные " + active],
         ["proxy", "Прокси " + proxy],
         ["direct", "Без VPN " + direct],
         ["failure", "Сбой " + failure],
-        ["closed", "Закрытые 0"]
+        ["closed", "Закрытые " + closed]
       ];
 
       return h("div", { staticClass: "hn-card hn-section hn-connections" }, [
@@ -1449,6 +1666,7 @@
             h("tbody", rows.map(function (connection) {
               var hostInfo = self.connectionHostInfo(connection);
               var serviceInfo = self.connectionServiceInfo(connection);
+              if (connection._failure) serviceInfo = { name: "Сбой", sub: connection.error || "Соединение не установлено" };
               return h("tr", [
                 h("td", { staticClass: "hn-conn-host" }, [
                   h("div", { staticClass: "hn-cell-main" }, hostInfo.title),
@@ -1458,7 +1676,7 @@
                   self.flagNode(h, self.connectionRoute(connection)),
                   h("span", self.cleanCountryName(self.connectionRoute(connection)))
                 ]),
-                h("td", self.connectionAge(connection)),
+                h("td", connection._closedAt ? new Date(connection._closedAt).toLocaleTimeString("ru-RU") : self.connectionAge(connection)),
                 h("td", { staticClass: "hn-traffic-cell" }, [
                   h("div", "↓ " + self.prettyBytes(connection.download)),
                   h("div", "↑ " + self.prettyBytes(connection.upload))
@@ -1467,9 +1685,17 @@
                   h("div", { staticClass: "hn-service" }, serviceInfo.name),
                   h("div", { staticClass: "hn-cell-sub" }, serviceInfo.sub)
                 ]),
-                h("td", self.connectionSource(connection)),
                 h("td", [
-                  connection.id ? h("button", {
+                  h("div", { staticClass: "hn-cell-main" }, self.connectionSource(connection).split(" · ")[0]),
+                  self.connectionSource(connection).indexOf(" · ") !== -1 ? h("div", { staticClass: "hn-cell-sub" }, self.connectionSource(connection).split(" · ")[1]) : null
+                ]),
+                h("td", { staticClass: "hn-row-actions" }, [
+                  h("button", {
+                    staticClass: "hn-icon-btn hn-copy-host",
+                    attrs: { type: "button", title: "Копировать домен или IP", "aria-label": "Копировать домен" },
+                    on: { click: function () { self.copyConnectionHost(connection); } }
+                  }, "⧉"),
+                  connection.id && !connection._closed && !connection._failure ? h("button", {
                     staticClass: "hn-icon-btn hn-danger",
                     attrs: { type: "button", title: "Закрыть соединение", "aria-label": "Закрыть соединение", disabled: Boolean(self.actionLoading) },
                     on: { click: function () { self.closeConnection(connection.id); } }
@@ -1495,10 +1721,6 @@
         ["full_proxy_bypass_ru", "Полный VPN без РФ"],
         ["exclude", "Выключить VPN"]
       ];
-      var serverOptions = [["default", "По умолчанию"]].concat(self.deviceOutbounds.map(function (outbound) {
-        return [outbound.tag, self.cleanCountryName(outbound.tag) || outbound.tag];
-      }));
-
       return h("div", { staticClass: "hn-card hn-section hn-devices" }, [
         h("div", { staticClass: "hn-devices-head" }, [
           h("div", { staticClass: "hn-section-title" }, "Устройства"),
@@ -1530,15 +1752,12 @@
               h("th", "Устройство"),
               h("th", "IP"),
               h("th", "Статус"),
-              h("th", "Режим"),
-              h("th", "Сервер")
+              h("th", "Режим")
             ])]),
             h("tbody", rows.map(function (device) {
               var ip = device.ip || "";
               var currentRoute = self.devicePendingRoutes[ip] || self.deviceSavedRoute(ip);
-              var currentServer = self.devicePendingServers[ip] || self.deviceSavedServer(ip);
               var routePending = Boolean(self.devicePendingRoutes[ip] && self.devicePendingRoutes[ip] !== self.deviceSavedRoute(ip));
-              var serverPending = Boolean(self.devicePendingServers[ip] && self.devicePendingServers[ip] !== self.deviceSavedServer(ip));
               return h("tr", [
                 h("td", [
                   h("div", { staticClass: "hn-device-name", attrs: { title: device.name || "" } }, device.name || "Неизвестное устройство"),
@@ -1552,11 +1771,6 @@
                   self.optionSelectField(h, "device-route:" + ip, currentRoute, modeOptions, function (value) {
                     self.setDeviceRoutePending(ip, value);
                   }, routePending ? "hn-device-select pending" : "hn-device-select")
-                ]),
-                h("td", [
-                  self.optionSelectField(h, "device-server:" + ip, currentServer, serverOptions, function (value) {
-                    self.setDeviceServerPending(ip, value);
-                  }, serverPending ? "hn-device-select hn-device-server pending" : "hn-device-select hn-device-server")
                 ])
               ]);
             }))
@@ -1622,7 +1836,7 @@
     selectField: function (h, key, options) {
       var self = this;
       return self.optionSelectField(h, key, self.form[key], options, function (value) {
-        self.formValue(key, value, true);
+        self.formValue(key, value);
       });
     },
     segmentedField: function (h, key, options) {
@@ -1632,7 +1846,7 @@
         return h("button", {
           staticClass: active ? "hn-segment active" : "hn-segment",
           attrs: { type: "button" },
-          on: { click: function () { if (!active) self.formValue(key, item[0], true); } }
+          on: { click: function () { if (!active) self.formValue(key, item[0], key === "connection_type"); } }
         }, item[1]);
       }));
     },
@@ -1719,14 +1933,7 @@
       });
     },
     manualTextAreaField: function (h, key, placeholder, rows) {
-      var self = this;
-      return h("div", [
-        self.textAreaField(h, key, placeholder, rows),
-        self.formDirty ? h("div", { staticClass: "hn-actions hn-manual-actions" }, [
-          self.actionButton(h, "Применить", self.saveMainConfig, true, self.actionLoading === "set_main_config"),
-          self.actionButton(h, "Отменить", self.resetMainConfig, false, false)
-        ]) : null
-      ]);
+      return this.textAreaField(h, key, placeholder, rows);
     },
     inputField: function (h, key, placeholder) {
       var self = this;
@@ -1998,6 +2205,99 @@
         ])
       ]);
     },
+    renderMihomoConfigModal: function (h) {
+      var self = this;
+      if (!self.mihomoModalOpen) return null;
+      var config = self.mihomoConfig && self.mihomoConfig.config ? String(self.mihomoConfig.config) : "";
+      var stats = self.mihomoConfigStats();
+      var overview = self.mihomoConfigOverview();
+      var sections = self.mihomoConfigSections();
+      var visibleConfig = self.mihomoVisibleConfig();
+      return h("div", {
+        staticClass: "hn-modal-backdrop",
+        on: {
+          click: function (event) {
+            if (event.target === event.currentTarget) self.closeMihomoConfig();
+          }
+        }
+      }, [
+        h("div", { staticClass: "hn-modal hn-mihomo-modal" }, [
+          h("div", { staticClass: "hn-modal-head" }, [
+            h("div", [
+              h("div", { staticClass: "hn-modal-title" }, "Mihomo config"),
+              h("div", { staticClass: "hn-muted" }, "Активный Remnawave YAML · только чтение")
+            ]),
+            h("button", { staticClass: "hn-icon-btn", attrs: { type: "button" }, on: { click: self.closeMihomoConfig } }, "x")
+          ]),
+          self.mihomoConfigError ? h("div", { staticClass: "hn-error" }, self.mihomoConfigError) : null,
+          self.mihomoConfigLoading ? h("div", { staticClass: "hn-placeholder" }, "Loading Mihomo config...") : null,
+          !self.mihomoConfigLoading && self.mihomoConfig ? h("div", { staticClass: "hn-mihomo-body" }, [
+            h("div", { staticClass: "hn-mihomo-stats" }, [
+              h("div", { staticClass: "hn-mini-stat" }, [h("span", { staticClass: "hn-mini-label" }, "path"), h("span", { staticClass: "hn-mini-value" }, self.mihomoConfig.path || "N/A")]),
+              h("div", { staticClass: "hn-mini-stat" }, [h("span", { staticClass: "hn-mini-label" }, "size"), h("span", { staticClass: "hn-mini-value" }, stats.size)]),
+              h("div", { staticClass: "hn-mini-stat" }, [h("span", { staticClass: "hn-mini-label" }, "lines"), h("span", { staticClass: "hn-mini-value" }, String(stats.lines))]),
+              h("div", { staticClass: "hn-mini-stat" }, [h("span", { staticClass: "hn-mini-label" }, "proxies"), h("span", { staticClass: "hn-mini-value" }, String(stats.proxies))]),
+              h("div", { staticClass: "hn-mini-stat" }, [h("span", { staticClass: "hn-mini-label" }, "providers"), h("span", { staticClass: "hn-mini-value" }, String(stats.providers))]),
+              h("div", { staticClass: "hn-mini-stat" }, [h("span", { staticClass: "hn-mini-label" }, "rules"), h("span", { staticClass: "hn-mini-value" }, String(stats.rules))])
+            ]),
+            h("div", { staticClass: "hn-mihomo-overview" }, [
+              h("div", { staticClass: "hn-mihomo-overview-box" }, [
+                h("div", { staticClass: "hn-mihomo-overview-title" }, "Proxy groups"),
+                h("div", { staticClass: "hn-mihomo-tags" }, overview.groups.map(function (name) {
+                  return h("span", { staticClass: "hn-mihomo-tag group" }, name);
+                }))
+              ]),
+              h("div", { staticClass: "hn-mihomo-overview-box" }, [
+                h("div", { staticClass: "hn-mihomo-overview-title" }, "Proxies"),
+                h("div", { staticClass: "hn-mihomo-tags" }, overview.proxies.map(function (name) {
+                  return h("span", { staticClass: "hn-mihomo-tag" }, name);
+                }))
+              ]),
+              h("div", { staticClass: "hn-mihomo-overview-box" }, [
+                h("div", { staticClass: "hn-mihomo-overview-title" }, "Rule providers"),
+                h("div", { staticClass: "hn-mihomo-tags" }, overview.providers.map(function (name) {
+                  return h("span", { staticClass: "hn-mihomo-tag" }, name);
+                }))
+              ])
+            ]),
+            h("div", { staticClass: "hn-mihomo-toolbar" }, [
+              h("input", {
+                staticClass: "hn-input",
+                attrs: { type: "search", placeholder: "Поиск по YAML..." },
+                domProps: { value: self.mihomoConfigSearch },
+                on: { input: function (event) { self.mihomoConfigSearch = event.target.value; } }
+              }),
+              h("button", { staticClass: "hn-btn", attrs: { type: "button" }, on: { click: self.copyMihomoConfig } }, "Копировать")
+            ]),
+            h("div", { staticClass: "hn-mihomo-sections" }, [
+              h("button", {
+                staticClass: self.mihomoConfigSection === "all" ? "hn-chip active" : "hn-chip",
+                attrs: { type: "button" },
+                on: { click: function () { self.mihomoConfigSection = "all"; } }
+              }, "Весь YAML")
+            ].concat(sections.map(function (section) {
+              return h("button", {
+                staticClass: self.mihomoConfigSection === section ? "hn-chip active" : "hn-chip",
+                attrs: { type: "button" },
+                on: { click: function () { self.mihomoConfigSection = section; } }
+              }, section);
+            }))),
+            h("div", { staticClass: "hn-mihomo-editor" }, [
+              h("div", { staticClass: "hn-mihomo-gutter" }, visibleConfig.split(/\r?\n/).map(function (_line, index) {
+                return h("div", String(index + 1));
+              })),
+              h("pre", {
+                staticClass: self.mihomoConfigWrap ? "hn-mihomo-pre wrap" : "hn-mihomo-pre"
+              }, visibleConfig || (config ? "Совпадений не найдено" : "Config is empty"))
+            ])
+          ]) : null,
+          h("div", { staticClass: "hn-modal-actions" }, [
+            self.actionButton(h, "Обновить", self.loadMihomoConfig, false, self.mihomoConfigLoading),
+            self.actionButton(h, "Закрыть", self.closeMihomoConfig, false, false)
+          ])
+        ])
+      ]);
+    },
     renderDashboard: function (h) {
       var self = this;
       var data = self.dashboard || { metadata: {}, outbounds: [], proxies: {} };
@@ -2014,7 +2314,7 @@
         };
       }
       var selected = data.selected || "";
-      var mainProxy = data.proxies && data.proxies["main-out"];
+      var mainProxy = data.proxies && (data.proxies["🌍 Страна"] || data.proxies["main-out"]);
       if (!selected && mainProxy && mainProxy.now) selected = mainProxy.now;
       var visibleOutbounds = (data.outbounds || []).filter(function (outbound) {
         return !self.hiddenDashboardOutbound(outbound);
@@ -2069,9 +2369,8 @@
         ])),
         self.field(h, "UDP через TCP", "Применимо для SOCKS и Shadowsocks прокси", self.flagField(h, "enable_udp_over_tcp")),
         self.field(h, "Дополнительный маршрут через прокси", "Выбранные ниже сервисы и домены пойдут через отдельный SOCKS5, HTTP или HTTPS-прокси раньше основных правил VPN.", self.flagField(h, "upstream_proxy_enabled")),
-        self.field(h, "Готовые списки", "Выберите готовые списки для маршрутизации доменов и IP github.com/sentiox/sentinel-lists", self.renderReadyLists(h)),
         self.field(h, "Тип пользовательского списка доменов", "Выберите тип списка для добавления пользовательских доменов", self.selectField(h, "user_domain_list_type", listTypeOptions)),
-        self.form.user_domain_list_type === "text" ? self.field(h, "Список пользовательских доменов", "Домены можно писать через запятую, пробел или с новой строки. Комментарии начинаются с //. После ручного ввода нажмите «Применить» или «Отменить».", self.manualTextAreaField(h, "user_domains_text", "example.com, sub.example.com\n// Social networks\ndomain.com test.com // personal domains", 6)) : null,
+        self.form.user_domain_list_type === "text" ? self.field(h, "Список пользовательских доменов", "Домены можно писать через запятую, пробел или с новой строки. Комментарии начинаются с //. Для применения нажмите «Сохранить» внизу раздела.", self.manualTextAreaField(h, "user_domains_text", "example.com, sub.example.com\n// Social networks\ndomain.com test.com // personal domains", 6)) : null,
         self.field(h, "Тип пользовательского списка подсетей", "Выберите тип списка для добавления пользовательских подсетей", self.selectField(h, "user_subnet_list_type", listTypeOptions)),
         self.form.user_subnet_list_type === "text" ? self.field(h, "Список пользовательских подсетей", "Введите подсети или IP, разделяя их запятыми, пробелами или переносами строк.", self.manualTextAreaField(h, "user_subnets_text", "192.168.1.2\n192.168.1.0/24", 4)) : null,
         self.field(h, "Локальные списки", "Файлы списков из файловой системы роутера. Обычно не нужно.", self.advancedListSwitch(h, "local")),
@@ -2084,7 +2383,14 @@
         self.advancedListOpen.routed ? self.field(h, "IP-адреса", "Укажите локальные IP-адреса или подсети, трафик которых всегда будет направляться через настроенный маршрут.", self.manualTextAreaField(h, "fully_routed_ips", "192.168.7.129\n192.168.1.2 or 192.168.1.0/24", 3)) : null,
         self.field(h, "Включить смешанный прокси", "Включить смешанный прокси-сервер, разрешив этому разделу маршрутизировать трафик как через HTTP, так и через SOCKS-прокси.", self.flagField(h, "mixed_proxy_enabled")),
         self.form.mixed_proxy_enabled === "1" ? self.field(h, "Порт смешанного прокси", "Укажите свободный локальный порт.", self.inputField(h, "mixed_proxy_port", "2080")) : null,
-        self.field(h, "Разрешение реальных IP-адресов", "Разрешать домены в реальные IP-адреса перед маршрутизацией в outbound", self.flagField(h, "resolve_real_ip_for_routing"))
+        self.field(h, "Разрешение реальных IP-адресов", "Разрешать домены в реальные IP-адреса перед маршрутизацией в outbound", self.flagField(h, "resolve_real_ip_for_routing")),
+        h("div", { staticClass: "hn-savebar" }, [
+          h("span", { staticClass: "hn-muted" }, self.formDirty ? "Есть несохранённые изменения" : "Настройки синхронизированы"),
+          h("div", { staticClass: "hn-actions" }, [
+            self.actionButton(h, "Сохранить", self.saveMainConfig, true, self.actionLoading === "set_main_config"),
+            self.actionButton(h, "Сбросить", self.resetMainConfig, false, false)
+          ])
+        ])
       ]);
     },
     renderProxy: function (h) {
@@ -2116,7 +2422,6 @@
         self.field(h, "Логин прокси", "Оставьте пустым, если авторизация не требуется.", self.inputField(h, "upstream_proxy_username", "")),
         self.field(h, "Пароль прокси", "Пароль не выводится в интерфейсе после ввода и не должен попадать в логи.", self.inputField(h, "upstream_proxy_password", "")),
         self.form.upstream_proxy_protocol === "https" ? self.field(h, "TLS server name", "Опциональное имя сервера. Нужно, если HTTPS-прокси требует отдельное SNI-имя.", self.inputField(h, "upstream_proxy_tls_server_name", "proxy.example.com")) : null,
-        self.field(h, "Готовые списки через прокси", "Эти списки имеют приоритет над основными VPN-списками. При пересечении победит дополнительный прокси.", self.renderProxyReadyLists(h)),
         self.field(h, "Домены через прокси", "Дополнительные домены через прокси: по одному в строке либо через запятую. Указывайте без протокола.", self.textAreaField(h, "upstream_proxy_domains", "example.com\napi.example.com", 5)),
         h("div", { staticClass: "hn-savebar" }, [
           h("span", { staticClass: "hn-muted" }, self.formDirty ? "Есть несохранённые изменения" : "Настройки синхронизированы"),
@@ -2178,12 +2483,12 @@
         ["panic", "Panic"]
       ];
       var configPathOptions = [
-        ["/etc/sing-box/config.json", "Flash (/etc/sing-box/config.json)"],
-        ["/tmp/sing-box/config.json", "RAM (/tmp/sing-box/config.json)"]
+        ["/tmp/mihomo/config.yaml", "RAM (/tmp/mihomo/config.yaml)"],
+        ["/etc/harpynet/mihomo-config.yaml", "Flash (/etc/harpynet/mihomo-config.yaml)"]
       ];
       var cachePathOptions = [
-        ["/etc/harpynet/cache.db", "/etc/harpynet/cache.db"],
-        ["/tmp/harpynet/cache.db", "/tmp/harpynet/cache.db"]
+        ["/etc/harpynet/mihomo-config.yaml", "/etc/harpynet/mihomo-config.yaml"],
+        ["/etc/harpynet/mihomo-subscription.yaml", "/etc/harpynet/mihomo-subscription.yaml"]
       ];
       var interfaceOptions = self.interfaceOptions();
 
@@ -2206,15 +2511,15 @@
             self.settingsMultiSelectField(h, "badwan_monitored_interfaces", interfaceOptions, "Выберите интерфейсы")
           ]) : null
         ])),
-        self.field(h, "Включить YACD", "Включает Clash-compatible панель sing-box. Локальный адрес на этом роутере: http://192.168.8.1:9090/ui", self.settingsFlagField(h, "enable_yacd")),
+        self.field(h, "Включить YACD", "Включает Clash-compatible панель Mihomo. Локальный адрес на этом роутере: http://192.168.8.1:9090/ui", self.settingsFlagField(h, "enable_yacd")),
         self.field(h, "Отключить QUIC", "Отключить QUIC протокол для улучшения совместимости или исправления видео-стриминга.", self.settingsFlagField(h, "disable_quic")),
         self.field(h, "Частота обновления списков", "Как часто HarpyNet обновляет доменные/IP списки.", self.settingsSelectField(h, "update_interval", updateOptions)),
         self.field(h, "Частота обновления подписки", "Как часто HarpyNet заново загружает подписку для обновления ключей, серверов и информации о подписке.", self.settingsSelectField(h, "subscription_update_interval", subscriptionUpdateOptions)),
         self.field(h, "Скачивать списки через прокси", "Загружать списки доменов и подсетей через выбранную прокси-секцию.", self.settingsFlagField(h, "download_lists_via_proxy")),
         self.field(h, "Не изменять DHCP", "Если включить, HarpyNet не будет менять конфигурацию DHCP/dnsmasq. Для обычной установки лучше оставить выключенным.", self.settingsFlagField(h, "dont_touch_dhcp")),
-        self.field(h, "Путь к файлу конфигурации", "Advanced: меняйте только если понимаете, куда sing-box должен писать config.json.", self.settingsSelectField(h, "config_path", configPathOptions)),
-        self.field(h, "Путь к файлу кэша", "Advanced: путь к cache.db sing-box.", self.settingsSelectField(h, "cache_path", cachePathOptions)),
-        self.field(h, "Уровень логов", "Уровень логов sing-box.", self.settingsSelectField(h, "log_level", logOptions)),
+        self.field(h, "Путь к файлу конфигурации", "Активный YAML Mihomo или его копия во flash.", self.settingsSelectField(h, "config_path", configPathOptions)),
+        self.field(h, "Путь к файлу кэша", "Сохранённый YAML Remnawave/Mihomo.", self.settingsSelectField(h, "cache_path", cachePathOptions)),
+        self.field(h, "Уровень логов", "Уровень логов Mihomo.", self.settingsSelectField(h, "log_level", logOptions)),
         self.field(h, "Исключить NTP", "Синхронизация времени будет идти напрямую, минуя HarpyNet.", self.settingsFlagField(h, "exclude_ntp")),
         self.field(h, "Исключённые из маршрутизации IP-адреса", "Локальные IP-адреса, которые нужно пустить напрямую и не трогать HarpyNet. Обычно не нужно.", self.advancedListSwitch(h, "excluded")),
         self.advancedListOpen.excluded ? self.field(h, "IP-адреса без маршрутизации", "Локальные IP-адреса, которые нужно пустить напрямую и не трогать HarpyNet.", self.settingsTextAreaField(h, "routing_excluded_ips", "192.168.8.50", 3)) : null,
@@ -2257,7 +2562,7 @@
       h("style", [".hn-ready-summary{position:relative}.hn-ready-summary .hn-caret{top:50%;right:13px;margin-top:-9px}.hn-ready-summary.hn-combo-summary .hn-caret{right:13px}"]),
       h("style", [".hn-head{grid-template-columns:minmax(0,1fr) minmax(420px,520px);align-items:start}.hn-head-main{min-width:0}.hn-head-side{display:flex;flex-direction:column;gap:10px;min-width:0}.hn-head-sub{align-self:stretch;border:1px solid rgba(52,201,255,.22);background:linear-gradient(90deg,rgba(52,201,255,.08),rgba(52,201,255,.02));border-radius:8px;padding:12px 14px;box-shadow:0 10px 28px rgba(0,0,0,.08)}.hn-head-sub-title{display:flex;align-items:center;gap:8px;margin-bottom:9px;font-weight:800}.hn-head-sub-title span:first-child{color:var(--hn-primary-2);text-transform:uppercase;font-size:12px;letter-spacing:.04em}.hn-head-sub-main{display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:var(--hn-text);font-weight:700}.hn-head-sub-main .hn-pill{min-height:24px;padding:1px 9px}.hn-head-sub-line{margin-top:8px;color:var(--hn-soft);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.hn-grid{grid-template-columns:repeat(3,minmax(0,1fr))}@media(max-width:1050px){.hn-head{grid-template-columns:1fr}.hn-head-sub{width:auto}.hn-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:560px){.hn-grid{grid-template-columns:1fr}.hn-head-sub-line{white-space:normal}}"]),
       h("style", [".hn-head-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:0}.hn-mini-stat{min-height:34px;display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--hn-border);border-radius:8px;background:var(--hn-card);padding:7px 11px;box-shadow:0 8px 20px rgba(0,0,0,.06)}.hn-mini-label{font-size:12px;color:var(--hn-soft)}.hn-mini-value{font-size:14px;font-weight:800;color:var(--hn-text);white-space:nowrap}.hn-mini-stat .hn-badge{min-height:22px;padding:1px 8px}.hn-mini-version{font-size:18px}@media(max-width:560px){.hn-head-stats{grid-template-columns:1fr}.hn-mini-stat{justify-content:space-between}}"]),
-      h("style", [".hn-head-sub{position:relative;padding-right:52px}.hn-sub-refresh{position:absolute;right:12px;top:12px;width:30px;height:30px;border-radius:8px;border:1px solid rgba(52,201,255,.28);background:rgba(12,18,28,.36);color:var(--hn-primary-2);display:inline-flex;align-items:center;justify-content:center;cursor:pointer}.hn-sub-refresh:hover:not(:disabled){border-color:var(--hn-primary-2);background:rgba(52,201,255,.12)}.hn-sub-refresh:disabled{opacity:.7;cursor:not-allowed}.hn-refresh-svg{width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center}.hn-refresh-svg svg{width:18px;height:18px;display:block}.hn-refresh-svg path{fill:none;stroke:currentColor;stroke-width:2.35;stroke-linecap:round;stroke-linejoin:round}.hn-sub-refresh:hover .hn-refresh-svg{transform:rotate(20deg);transition:transform .16s ease}.hn-sub-refresh.loading{border-color:rgba(19,199,130,.55);color:#13c782;background:rgba(19,199,130,.08)}"]),
+      h("style", [".hn-head-sub{position:relative;padding-right:108px}.hn-head-sub-actions{position:absolute;right:10px;top:10px;display:flex;align-items:center;gap:6px}.hn-sub-refresh{width:30px;height:30px;border-radius:8px;border:1px solid rgba(52,201,255,.28);background:rgba(12,18,28,.36);color:var(--hn-primary-2);display:inline-flex;align-items:center;justify-content:center;cursor:pointer}.hn-sub-refresh:hover:not(:disabled){border-color:var(--hn-primary-2);background:rgba(52,201,255,.12)}.hn-sub-refresh:disabled{opacity:.7;cursor:not-allowed}.hn-refresh-svg{width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center}.hn-refresh-svg svg{width:18px;height:18px;display:block}.hn-refresh-svg path{fill:none;stroke:currentColor;stroke-width:2.35;stroke-linecap:round;stroke-linejoin:round}.hn-sub-refresh:hover .hn-refresh-svg{transform:rotate(20deg);transition:transform .16s ease}.hn-sub-refresh.loading{border-color:rgba(19,199,130,.55);color:#13c782;background:rgba(19,199,130,.08)}"]),
       h("style", [".hn-btn-loading{display:inline-flex;align-items:center;justify-content:center;gap:8px}.hn-btn-spinner{width:13px;height:13px;border-radius:50%;border:2px solid rgba(255,255,255,.25);border-top-color:currentColor;animation:hn-spin .75s linear infinite;flex:0 0 auto}"]),
       h("style", [".hn-ping-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-width:128px}.hn-ping-btn.loading{border-color:rgba(19,199,130,.62);color:#13c782;background:rgba(19,199,130,.08)}.hn-ping-loader{width:14px;height:14px;border-radius:50%;border:2px solid rgba(19,199,130,.26);border-top-color:#13c782;animation:hn-spin .75s linear infinite}.hn-latency-loading,.hn-latency-ready,.hn-latency-wait,.hn-latency-value{display:inline-flex;align-items:center;justify-content:flex-end;gap:6px;min-width:54px;font-size:12px;font-weight:800}.hn-latency-loading,.hn-latency-ready,.hn-latency-value{color:#13c782}.hn-latency-wait{color:var(--hn-soft);opacity:.7}.hn-latency-dot{width:10px;height:10px;border-radius:50%;border:2px solid rgba(19,199,130,.24);border-top-color:#13c782;animation:hn-spin .75s linear infinite}@keyframes hn-spin{to{transform:rotate(360deg)}}"]),
       h("style", [".hn-notice{position:fixed;right:22px;top:78px;z-index:2600;min-width:280px;max-width:min(420px,calc(100vw - 44px));margin:0!important;padding:12px 12px 12px 14px!important;border-radius:8px!important;border:1px solid rgba(19,199,130,.34)!important;background:rgba(23,48,37,.96)!important;color:#22d08e!important;display:flex;align-items:center;justify-content:space-between;gap:14px;box-shadow:0 16px 45px rgba(0,0,0,.34);animation:hn-toast-in .18s ease-out both}.hn-notice:before{content:\"\";width:7px;height:7px;border-radius:50%;background:#16c784;box-shadow:0 0 0 4px rgba(22,199,132,.12);flex:0 0 auto}.hn-notice>span:first-child{min-width:0;line-height:1.35}.hn-notice-timer{position:relative;width:20px;height:20px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;box-shadow:0 0 0 1px rgba(19,199,130,.14)}.hn-notice-timer:before{content:\"\";position:absolute;inset:2px;border-radius:50%;background:#0d2319;box-shadow:inset 0 0 0 1px rgba(19,199,130,.14)}.hn-notice-timer-text{position:relative;z-index:1;color:#d9fff0;font-size:10px;font-weight:500;line-height:1}@keyframes hn-toast-in{from{opacity:0;transform:translateX(14px) translateY(-4px)}to{opacity:1;transform:translateX(0) translateY(0)}}@media(max-width:700px){.hn-notice{left:14px;right:14px;top:72px;max-width:none;min-width:0}}"]),
@@ -2266,11 +2571,15 @@
       h("style", [".hn-option-summary{position:relative;text-align:left;display:flex;align-items:center;min-height:38px;padding:0 44px 0 10px;cursor:pointer}.hn-option-summary:after{content:\"\";position:absolute;right:39px;top:0;bottom:0;width:1px;background:var(--hn-border)}.hn-option-summary .hn-caret{right:11px;top:50%;margin-top:-9px}.hn-option-text{display:block;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.hn-option .hn-combo-panel{top:43px}.hn-option .hn-combo-item{grid-template-columns:minmax(0,1fr)}.hn-option .hn-combo-value{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"]),
       h("style", [".hn-select{appearance:none;-webkit-appearance:none;padding-right:44px;background-image:linear-gradient(to right,transparent calc(100% - 40px),var(--hn-border) calc(100% - 40px),var(--hn-border) calc(100% - 39px),transparent calc(100% - 39px)),url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 14 14'%3E%3Cpath d='M3 5l4 4 4-4' fill='none' stroke='%23f2f6ff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E\");background-position:right 0 top 0,right 13px center;background-size:40px 100%,14px 14px;background-repeat:no-repeat}.hn-theme-light .hn-select{background-image:linear-gradient(to right,transparent calc(100% - 40px),var(--hn-border) calc(100% - 40px),var(--hn-border) calc(100% - 39px),transparent calc(100% - 39px)),url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 14 14'%3E%3Cpath d='M3 5l4 4 4-4' fill='none' stroke='%230b1324' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E\")}.hn-select::-ms-expand{display:none}.hn-multi .hn-ready-summary{height:38px;min-height:38px;padding:0 44px 0 8px;flex-wrap:nowrap;position:relative}.hn-multi .hn-ready-summary:after{content:\"\";position:absolute;right:39px;top:0;bottom:0;width:1px;background:var(--hn-border)}.hn-multi .hn-ready-summary .hn-caret{right:11px;top:50%;width:18px;height:18px;margin-top:-9px}.hn-multi .hn-ready-summary .hn-caret:before{width:7px;height:7px}.hn-multi .hn-chip{max-width:calc(100% - 4px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"]),
       h("style", [".hn-connections{overflow:hidden}.hn-conn-toolbar{display:grid;grid-template-columns:minmax(260px,1fr) 240px auto;gap:10px;align-items:center;margin-bottom:10px}.hn-conn-filters{display:flex;gap:8px;flex-wrap:wrap}.hn-conn-filter{height:34px;padding:0 12px;border:0;border-radius:999px;background:transparent;color:var(--hn-text);cursor:pointer;font-weight:400}.hn-conn-filter.active{background:rgba(52,201,255,.13);color:var(--hn-primary-2);font-weight:400}.hn-conn-search-wrap{height:34px;width:240px;position:relative;display:block}.hn-search-icon{position:absolute;left:11px;top:50%;width:13px;height:13px;margin-top:-7px;border:2px solid var(--hn-soft);border-radius:50%;opacity:.9;pointer-events:none}.hn-search-icon:after{content:\"\";position:absolute;width:6px;height:2px;right:-5px;bottom:-3px;background:var(--hn-soft);border-radius:2px;transform:rotate(45deg)}.hn-conn-search{width:100%;max-width:none;height:34px;border-radius:999px;padding-left:34px;background:rgba(19,22,30,.72)}.hn-conn-search::-webkit-search-cancel-button{filter:invert(1);opacity:.6}.hn-danger{border-color:rgba(255,92,104,.58)!important;color:#ff6d7a!important;position:relative}.hn-danger:before,.hn-danger:after{content:\"\";position:absolute;left:50%;top:50%;width:12px;height:1.6px;border-radius:2px;background:currentColor;transform-origin:center}.hn-danger:before{transform:translate(-50%,-50%) rotate(45deg)}.hn-danger:after{transform:translate(-50%,-50%) rotate(-45deg)}.hn-danger:hover:not(:disabled){background:rgba(255,92,104,.11)!important;border-color:#ff6d7a!important;color:#ff7f8a!important}.hn-danger:disabled{opacity:.45}.hn-conn-totals{display:flex;gap:14px;color:var(--hn-soft);font-size:12px;margin:0 0 10px}.hn-conn-table-wrap{overflow:auto;max-height:560px;border-top:1px solid var(--hn-line)}.hn-conn-table{width:100%;border-collapse:collapse;min-width:980px}.hn-conn-table th,.hn-conn-table td{padding:8px 8px;border-bottom:1px solid var(--hn-line);text-align:left;vertical-align:top;color:var(--hn-text);font-size:13px}.hn-conn-table th{position:sticky;top:0;background:var(--hn-card);z-index:1;color:var(--hn-soft);font-weight:800}.hn-conn-host{max-width:230px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.hn-route-proxy{font-weight:800;color:#9bc7ff!important}.hn-route-direct{font-weight:800;color:#f3c65b!important}.hn-service{display:inline-block;color:#13b675;font-weight:800;max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.hn-theme-light .hn-conn-filter.active{background:#e8f7ff}.hn-theme-light .hn-conn-search{background:#eef2f8}.hn-theme-light .hn-conn-table th{background:var(--hn-card)}@media(max-width:980px){.hn-conn-toolbar{grid-template-columns:1fr}.hn-conn-search-wrap{width:min(100%,260px)}.hn-conn-table-wrap{max-height:none}}"]),
-      h("style", [".hn-devices{overflow:visible}.hn-devices-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.hn-devices-filters{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 12px}.hn-device-filter{height:34px;display:inline-flex;align-items:center;gap:7px;padding:0 11px;border-radius:7px;border:1px solid var(--hn-border);background:var(--hn-card-strong);color:var(--hn-text);cursor:pointer}.hn-device-filter.active{border-color:var(--hn-primary-2);background:rgba(52,201,255,.13);color:var(--hn-primary-2)}.hn-filter-count{min-width:17px;height:17px;display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:rgba(120,130,150,.18);border:1px solid rgba(140,155,184,.24);font-size:11px}.hn-devices-table-wrap{overflow:visible;border-top:1px solid var(--hn-line)}.hn-devices-table{width:100%;min-width:920px;border-collapse:collapse;table-layout:fixed}.hn-devices-table th,.hn-devices-table td{padding:8px 10px;border-bottom:1px solid var(--hn-line);text-align:left;vertical-align:middle}.hn-devices-table th{color:var(--hn-soft);font-size:12px;font-weight:800}.hn-devices-table th:nth-child(1),.hn-devices-table td:nth-child(1){width:27%}.hn-devices-table th:nth-child(2),.hn-devices-table td:nth-child(2){width:14%}.hn-devices-table th:nth-child(3),.hn-devices-table td:nth-child(3){width:14%}.hn-devices-table th:nth-child(4),.hn-devices-table td:nth-child(4){width:22%}.hn-devices-table th:nth-child(5),.hn-devices-table td:nth-child(5){width:23%}.hn-device-name{font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.hn-device-status{display:inline-flex;align-items:center;gap:6px;font-weight:800}.hn-device-status:before{content:\"\";width:7px;height:7px;border-radius:50%;background:currentColor}.hn-device-status.online{color:#13b675}.hn-device-status.offline{color:#e04f5f}.hn-device-select{width:100%;max-width:220px}.hn-device-server{max-width:260px}.hn-device-select.pending .hn-option-summary{border-color:var(--hn-primary-2);box-shadow:0 0 0 2px rgba(52,201,255,.13)}.hn-devices .hn-combo{z-index:40}.hn-devices .hn-combo.open{z-index:280}.hn-devices .hn-combo-panel{min-width:100%;width:max-content;max-width:360px;z-index:300}.hn-devices .hn-combo-item{grid-template-columns:minmax(0,1fr);white-space:nowrap}@media(max-width:760px){.hn-devices-head{align-items:flex-start;flex-direction:column}.hn-devices-table,.hn-devices-table tbody,.hn-devices-table tr,.hn-devices-table td{display:block;width:100%!important;box-sizing:border-box}.hn-devices-table{min-width:0}.hn-devices-table thead{display:none}.hn-devices-table tr{margin-bottom:10px;padding:10px;border:1px solid var(--hn-line);border-radius:8px;background:var(--hn-card-strong)}.hn-devices-table td{border:0!important;padding:4px 0}.hn-device-select,.hn-device-server{max-width:none}.hn-devices .hn-combo-panel{width:100%;max-width:none;top:43px;bottom:auto}}"]),
+      h("style", [".hn-conn-table th:nth-child(7),.hn-conn-table td:nth-child(7){width:74px!important}.hn-row-actions{display:flex!important;gap:6px;align-items:center;justify-content:flex-end;white-space:nowrap}.hn-row-actions .hn-icon-btn{flex:0 0 32px}.hn-copy-host{color:var(--hn-primary-2);font-size:17px;line-height:1}.hn-copy-host:hover{border-color:var(--hn-primary-2);background:rgba(52,201,255,.1)}@media(max-width:760px){.hn-conn-table tr{padding-right:82px!important}.hn-conn-table td:nth-child(7){right:8px!important;width:70px!important;margin-top:-16px!important}}"]),
+      h("style", [".hn-devices{overflow:visible}.hn-devices-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.hn-devices-filters{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 12px}.hn-device-filter{height:34px;display:inline-flex;align-items:center;gap:7px;padding:0 11px;border-radius:7px;border:1px solid var(--hn-border);background:var(--hn-card-strong);color:var(--hn-text);cursor:pointer}.hn-device-filter.active{border-color:var(--hn-primary-2);background:rgba(52,201,255,.13);color:var(--hn-primary-2)}.hn-filter-count{min-width:17px;height:17px;display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:rgba(120,130,150,.18);border:1px solid rgba(140,155,184,.24);font-size:11px}.hn-devices-table-wrap{overflow:visible;border-top:1px solid var(--hn-line)}.hn-devices-table{width:100%;min-width:920px;border-collapse:collapse;table-layout:fixed}.hn-devices-table th,.hn-devices-table td{padding:8px 10px;border-bottom:1px solid var(--hn-line);text-align:left;vertical-align:middle}.hn-devices-table th{color:var(--hn-soft);font-size:12px;font-weight:800}.hn-devices-table th:nth-child(1),.hn-devices-table td:nth-child(1){width:32%}.hn-devices-table th:nth-child(2),.hn-devices-table td:nth-child(2){width:18%}.hn-devices-table th:nth-child(3),.hn-devices-table td:nth-child(3){width:18%}.hn-devices-table th:nth-child(4),.hn-devices-table td:nth-child(4){width:32%}.hn-device-name{font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.hn-device-status{display:inline-flex;align-items:center;gap:6px;font-weight:800}.hn-device-status:before{content:\"\";width:7px;height:7px;border-radius:50%;background:currentColor}.hn-device-status.online{color:#13b675}.hn-device-status.offline{color:#e04f5f}.hn-device-select{width:100%;max-width:220px}.hn-device-select.pending .hn-option-summary{border-color:var(--hn-primary-2);box-shadow:0 0 0 2px rgba(52,201,255,.13)}.hn-devices .hn-combo{z-index:40}.hn-devices .hn-combo.open{z-index:280}.hn-devices .hn-combo-panel{min-width:100%;width:max-content;max-width:360px;z-index:300}.hn-devices .hn-combo-item{grid-template-columns:minmax(0,1fr);white-space:nowrap}@media(max-width:760px){.hn-devices-head{align-items:flex-start;flex-direction:column}.hn-devices-table,.hn-devices-table tbody,.hn-devices-table tr,.hn-devices-table td{display:block;width:100%!important;box-sizing:border-box}.hn-devices-table{min-width:0}.hn-devices-table thead{display:none}.hn-devices-table tr{margin-bottom:10px;padding:10px;border:1px solid var(--hn-line);border-radius:8px;background:var(--hn-card-strong)}.hn-devices-table td{border:0!important;padding:4px 0}.hn-devices .hn-combo-panel{width:100%;max-width:none;top:43px;bottom:auto}}"]),
       h("style", [".hn-dashboard{padding:14px 14px 20px}.hn-dashboard-head{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid var(--hn-line);padding-bottom:10px;margin-bottom:12px}.hn-sub-card{border:1px solid rgba(52,201,255,.35);background:linear-gradient(90deg,rgba(52,201,255,.12),rgba(52,201,255,.03));border-radius:8px;padding:16px;margin-bottom:22px}.hn-sub-top{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}.hn-sub-label{text-transform:uppercase;letter-spacing:.03em;color:var(--hn-primary-2);font-weight:800}.hn-pill{display:inline-flex;align-items:center;min-height:28px;padding:2px 12px;border-radius:999px;border:1px solid var(--hn-border);background:rgba(120,130,150,.12);color:var(--hn-soft);font-size:12px}.hn-sub-announce{display:flex;gap:10px;flex-wrap:wrap;border:1px solid var(--hn-line);border-radius:8px;background:rgba(0,0,0,.12);padding:8px 10px;font-weight:700}.hn-outbounds{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.hn-outbound{min-height:70px;border:1px solid var(--hn-border);border-radius:8px;background:var(--hn-card-strong);padding:12px;display:flex;flex-direction:column;justify-content:space-between;text-align:left;color:var(--hn-text);cursor:pointer}.hn-outbound:disabled{opacity:.72;cursor:not-allowed}.hn-outbound:not(.active):hover{border-color:var(--hn-primary-2);background:color-mix(in srgb,var(--hn-primary-2) 8%,var(--hn-card-strong))}.hn-outbound.active{border-color:#00b978;box-shadow:0 0 0 1px #00b978 inset;background:linear-gradient(180deg,rgba(0,185,120,.13),var(--hn-card-strong))}.hn-outbound-name{font-weight:800;color:var(--hn-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.hn-outbound-meta{display:flex;justify-content:space-between;gap:12px;color:var(--hn-primary-2)}@media(max-width:1100px){.hn-outbounds{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:620px){.hn-dashboard-head{align-items:flex-start;flex-direction:column}.hn-outbounds{grid-template-columns:1fr}.hn-sub-announce{display:grid;grid-template-columns:1fr}}"]),
       h("style", [".hn-flag-img{width:21px;height:14px;object-fit:cover;border-radius:2px;box-shadow:0 0 0 1px rgba(255,255,255,.18);vertical-align:-2px;flex:0 0 auto}.hn-outbound-name{display:flex;align-items:center;gap:8px;min-width:0}.hn-outbound-name span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.hn-outbounds{grid-template-columns:repeat(3,minmax(220px,1fr))}.hn-outbound{min-height:78px}.hn-route-cell{display:flex;align-items:flex-start;gap:8px;min-width:190px;max-width:230px;line-height:1.25}.hn-route-cell span{white-space:normal;word-break:normal}.hn-conn-table{min-width:1180px;table-layout:fixed}.hn-conn-table th:nth-child(1),.hn-conn-table td:nth-child(1){width:170px}.hn-conn-table th:nth-child(2),.hn-conn-table td:nth-child(2){width:56px}.hn-conn-table th:nth-child(3),.hn-conn-table td:nth-child(3){width:220px}.hn-conn-table th:nth-child(4),.hn-conn-table td:nth-child(4){width:80px}.hn-conn-table th:nth-child(5),.hn-conn-table td:nth-child(5),.hn-conn-table th:nth-child(6),.hn-conn-table td:nth-child(6){width:105px}.hn-conn-table th:nth-child(7),.hn-conn-table td:nth-child(7){width:180px}.hn-conn-table th:nth-child(8),.hn-conn-table td:nth-child(8){width:150px}.hn-conn-table th:nth-child(9),.hn-conn-table td:nth-child(9){width:48px}.hn-service{max-width:170px;white-space:normal;overflow-wrap:anywhere;line-height:1.25}.hn-conn-table td:nth-child(8){white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.hn-conn-host{max-width:160px}@media(max-width:1100px){.hn-outbounds{grid-template-columns:repeat(2,minmax(220px,1fr))}}@media(max-width:620px){.hn-outbounds{grid-template-columns:1fr}}"]),
       h("style", [".hn-conn-table-wrap{overflow-y:auto;overflow-x:hidden}.hn-conn-table{min-width:0!important;width:100%;table-layout:fixed}.hn-conn-table th,.hn-conn-table td{padding:8px 7px}.hn-conn-table th:nth-child(1),.hn-conn-table td:nth-child(1){width:22%}.hn-conn-table th:nth-child(2),.hn-conn-table td:nth-child(2){width:210px}.hn-conn-table th:nth-child(3),.hn-conn-table td:nth-child(3){width:74px}.hn-conn-table th:nth-child(4),.hn-conn-table td:nth-child(4){width:118px}.hn-conn-table th:nth-child(5),.hn-conn-table td:nth-child(5){width:20%}.hn-conn-table th:nth-child(6),.hn-conn-table td:nth-child(6){width:120px}.hn-conn-table th:nth-child(7),.hn-conn-table td:nth-child(7){width:42px}.hn-cell-main,.hn-conn-host{min-width:0;max-width:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.hn-cell-sub{margin-top:2px;color:var(--hn-soft);font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.hn-route-cell{min-width:0;max-width:none;align-items:flex-start}.hn-route-cell span{min-width:0;display:block;white-space:normal;word-break:normal;overflow-wrap:normal;hyphens:none}.hn-traffic-cell{white-space:nowrap;color:var(--hn-text);line-height:1.55}.hn-service-cell{min-width:0}.hn-service{display:block;max-width:none;color:#13c782;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.25}.hn-conn-table td:nth-child(6){white-space:nowrap;overflow:hidden;text-overflow:ellipsis}@media(max-width:900px){.hn-conn-table th:nth-child(1),.hn-conn-table td:nth-child(1){width:26%}.hn-conn-table th:nth-child(2),.hn-conn-table td:nth-child(2){width:180px}.hn-conn-table th:nth-child(5),.hn-conn-table td:nth-child(5){width:19%}.hn-conn-table th:nth-child(6),.hn-conn-table td:nth-child(6){width:105px}}"]),
       h("style", ["@media(max-width:760px){.hn-conn-toolbar{display:grid;grid-template-columns:1fr 44px;gap:10px}.hn-conn-filters,.hn-conn-search-wrap{grid-column:1/-1;width:100%;max-width:none}.hn-conn-toolbar>.hn-btn{grid-column:1/2;width:100%}.hn-conn-toolbar>.hn-icon-btn{grid-column:2/3}.hn-conn-table-wrap{max-height:none;border-top:0}.hn-conn-table,.hn-conn-table tbody,.hn-conn-table tr,.hn-conn-table td{display:block;width:100%!important;box-sizing:border-box}.hn-conn-table thead{display:none}.hn-conn-table tr{position:relative;margin:0 0 10px;padding:10px 44px 10px 10px;border:1px solid var(--hn-line);border-radius:8px;background:var(--hn-card-strong)}.hn-conn-table td{border:0!important;padding:2px 0!important}.hn-conn-table td:nth-child(2){margin-top:8px}.hn-conn-table td:nth-child(3),.hn-conn-table td:nth-child(4),.hn-conn-table td:nth-child(6){display:inline-block;width:auto!important;margin-right:14px;vertical-align:top}.hn-conn-table td:nth-child(7){position:absolute;right:9px;top:50%;width:32px!important;margin-top:-16px}.hn-route-cell{display:flex!important;max-width:none;white-space:normal}.hn-route-cell span{overflow-wrap:normal;word-break:normal;white-space:normal}.hn-service{white-space:normal}.hn-cell-main{font-weight:800}.hn-cell-sub{white-space:normal}.hn-traffic-cell{font-size:12px}.hn-conn-table .hn-icon-btn{width:30px;height:30px}}"]),
+      h("style", [".hn-conn-table th:nth-child(7),.hn-conn-table td:nth-child(7){width:74px!important}.hn-row-actions{display:flex!important;gap:6px;align-items:center;justify-content:flex-end;white-space:nowrap}.hn-row-actions .hn-icon-btn{flex:0 0 32px}@media(max-width:760px){.hn-conn-table tr{padding-right:82px!important}.hn-conn-table td:nth-child(7){display:flex!important;right:8px!important;width:70px!important;margin-top:-16px!important}.hn-row-actions .hn-icon-btn{flex-basis:30px}}"]),
+      h("style", ["@media(max-width:1100px){.hn-conn-toolbar{display:grid;grid-template-columns:1fr 44px;gap:10px}.hn-conn-filters,.hn-conn-search-wrap{grid-column:1/-1;width:100%;max-width:none}.hn-conn-toolbar>.hn-btn{grid-column:1/2;width:100%}.hn-conn-toolbar>.hn-icon-btn{grid-column:2/3}.hn-conn-table-wrap{max-height:none;border-top:0}.hn-conn-table,.hn-conn-table tbody,.hn-conn-table tr,.hn-conn-table td{display:block;width:100%!important;box-sizing:border-box}.hn-conn-table thead{display:none}.hn-conn-table tr{position:relative;margin:0 0 10px;padding:10px 82px 10px 10px!important;border:1px solid var(--hn-line);border-radius:8px;background:var(--hn-card-strong)}.hn-conn-table td{border:0!important;padding:2px 0!important}.hn-conn-table td:nth-child(2){margin-top:8px}.hn-conn-table td:nth-child(3),.hn-conn-table td:nth-child(4),.hn-conn-table td:nth-child(6){display:inline-block;width:auto!important;margin-right:14px;vertical-align:top}.hn-conn-table td:nth-child(7){position:absolute;display:flex!important;right:8px!important;top:50%;width:70px!important;margin-top:-16px!important}.hn-route-cell{display:flex!important;max-width:none;white-space:normal}.hn-route-cell span{overflow-wrap:normal;word-break:normal;white-space:normal}.hn-service{white-space:normal}.hn-cell-main{font-weight:800}.hn-cell-sub{white-space:normal}.hn-traffic-cell{font-size:12px}.hn-conn-table .hn-icon-btn{width:30px;height:30px}.hn-row-actions .hn-icon-btn{flex-basis:30px}}"]),
+      h("style", [".hn-mihomo-open{height:30px;padding:0 9px;border-radius:7px;border:1px solid rgba(52,201,255,.45);background:rgba(52,201,255,.08);color:var(--hn-primary-2);font-size:12px;font-weight:800;cursor:pointer}.hn-mihomo-open:hover{background:rgba(52,201,255,.16)}.hn-mihomo-modal{width:min(1040px,calc(100vw - 40px));max-height:calc(100vh - 42px);display:flex;flex-direction:column}.hn-mihomo-body{min-height:0;display:flex;flex-direction:column;gap:10px}.hn-mihomo-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.hn-mihomo-stats .hn-mini-stat{min-width:0}.hn-mihomo-overview{display:flex;flex-direction:column;gap:9px}.hn-mihomo-overview-box{padding:10px;border:1px solid var(--hn-border);border-radius:8px;background:rgba(127,127,127,.035)}.hn-mihomo-overview-title{margin-bottom:7px;font-weight:800}.hn-mihomo-tags{display:flex;flex-wrap:wrap;gap:6px}.hn-mihomo-tag{display:inline-flex;align-items:center;min-height:24px;padding:2px 9px;border:1px solid var(--hn-border);border-radius:999px;background:rgba(127,127,127,.06);font-size:12px;font-weight:700}.hn-mihomo-tag.group{border-color:rgba(52,201,255,.28);background:rgba(52,201,255,.07)}.hn-mihomo-toolbar{display:grid;grid-template-columns:minmax(240px,1fr) auto;gap:8px}.hn-mihomo-sections{display:flex;gap:6px;overflow-x:auto;padding-bottom:3px}.hn-mihomo-sections .hn-chip{border:1px solid var(--hn-border);cursor:pointer;white-space:nowrap}.hn-mihomo-sections .hn-chip.active{border-color:var(--hn-primary);color:var(--hn-primary-2)}.hn-mihomo-editor{min-height:250px;max-height:38vh;display:grid;grid-template-columns:auto minmax(0,1fr);overflow:auto;border:1px solid var(--hn-border);border-radius:8px;background:var(--hn-input);scrollbar-color:#596273 transparent}.hn-mihomo-editor::-webkit-scrollbar-corner{background:transparent}.hn-mihomo-editor::-webkit-scrollbar-button{display:none;width:0;height:0;background:transparent}.hn-mihomo-gutter{padding:12px 9px;text-align:right;color:var(--hn-muted);background:rgba(127,127,127,.08);font:12px/1.45 monospace;user-select:none}.hn-mihomo-pre{min-height:250px;margin:0;padding:12px;border:0;background:transparent;color:var(--hn-text);font-size:12px;line-height:1.45;white-space:pre;overflow:visible}.hn-mihomo-pre.wrap{white-space:pre-wrap;overflow-wrap:anywhere}@media(max-width:760px){.hn-head-sub{padding-right:14px;padding-top:52px}.hn-head-sub-actions{left:12px;right:auto}.hn-mihomo-modal{width:calc(100vw - 18px);max-height:calc(100vh - 18px);padding:14px}.hn-mihomo-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.hn-mihomo-toolbar{grid-template-columns:1fr}.hn-mihomo-editor{max-height:42vh}}"]),
       h("div", { staticClass: "hn-head" }, [
         h("div", { staticClass: "hn-head-main" }, [
           h("div", { staticClass: "hn-title" }, "HarpyNet"),
@@ -2284,7 +2593,14 @@
         ]),
         h("div", { staticClass: "hn-head-side" }, [
           h("div", { staticClass: "hn-head-sub" }, [
-            status.has_subscription ? self.subscriptionUpdateButton(h) : null,
+            status.has_subscription ? h("div", { staticClass: "hn-head-sub-actions" }, [
+              h("button", {
+                staticClass: "hn-mihomo-open",
+                attrs: { type: "button", title: "Mihomo config" },
+                on: { click: self.openMihomoConfig }
+              }, "Mihomo"),
+              self.subscriptionUpdateButton(h)
+            ]) : null,
             h("div", { staticClass: "hn-head-sub-title" }, [
               h("span", status.has_subscription ? "Подписка" : "Подписка не добавлена")
             ]),
@@ -2354,7 +2670,8 @@
         self.activeTab === "devices" ? self.renderDevices(h) : null,
         self.activeTab === "connections" ? self.renderConnections(h) : null
       ]),
-      self.renderSubscriptionModal(h)
+      self.renderSubscriptionModal(h),
+      self.renderMihomoConfigModal(h)
     ]);
   }
 })

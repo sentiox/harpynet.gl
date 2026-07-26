@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=harpynet
 
-PKG_VERSION := $(if $(HARPYNET_VERSION),$(HARPYNET_VERSION),1.3.6)
+PKG_VERSION := $(if $(HARPYNET_VERSION),$(HARPYNET_VERSION),1.3.7)
 
 PKG_RELEASE:=1
 
@@ -14,7 +14,7 @@ include $(INCLUDE_DIR)/package.mk
 define Package/harpynet
 	SECTION:=net
 	CATEGORY:=Network
-	DEPENDS:=+sing-box +curl +jq +kmod-nft-tproxy +coreutils-base64 +bind-dig
+	DEPENDS:=+curl +jq +kmod-nft-tproxy +coreutils-base64 +bind-dig
 	CONFLICTS:=https-dns-proxy nextdns luci-app-passwall luci-app-passwall2
 	TITLE:=Domain routing app
 	URL:=https://github.com/sentiox/narpynet
@@ -46,8 +46,8 @@ define Package/harpynet/postinst
 
 [ -n "$${IPKG_INSTROOT}" ] && exit 0
 
-if [ -x /usr/bin/harpynet ]; then
-	/usr/bin/harpynet support_after_update main >/dev/null 2>&1 || true
+if [ -x /usr/bin/mihomo ] && [ -x /etc/init.d/harpynet ]; then
+	/etc/init.d/harpynet restart >/dev/null 2>&1 || true
 fi
 
 exit 0
@@ -68,9 +68,7 @@ define Package/harpynet/install
 	$(INSTALL_BIN) ./files/usr/bin/harpynet $(1)/usr/bin/harpynet
 
 	$(INSTALL_DIR) $(1)/usr/lib/harpynet
-	$(CP) ./files/usr/lib/* $(1)/usr/lib/harpynet/
-
-	sed -i -e 's/__COMPILED_VERSION_VARIABLE__/$(PKG_VERSION)/g' $(1)/usr/lib/harpynet/constants.sh
+	$(CP) ./files/usr/lib/harpynet/* $(1)/usr/lib/harpynet/
 endef
 
 $(eval $(call BuildPackage,harpynet))
