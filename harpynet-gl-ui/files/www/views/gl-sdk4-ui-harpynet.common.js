@@ -76,7 +76,8 @@
       connectionsRefreshing: false,
       mainAutoSaveTimer: null,
       mainAutoSaveKeys: [],
-      mainAutoSaving: false
+      mainAutoSaving: false,
+      refreshGeneration: 0
     };
   },
   computed: {
@@ -412,9 +413,11 @@
     },
     refresh: function () {
       var self = this;
+      var generation = ++self.refreshGeneration;
       self.theme = self.detectTheme();
       self.loading = !self.status;
       return self.callApi("summary").then(function (result) {
+        if (generation !== self.refreshGeneration) return;
         self.status = self.normalizeStatus(result || {});
         self.saveCachedStatus();
         if (!self.subscriptionModalOpen) {
@@ -434,9 +437,10 @@
         if (self.activeTab === "devices") self.refreshDevices();
         self.scrollActiveTabIntoView(false);
       }).catch(function (err) {
+        if (generation !== self.refreshGeneration) return;
         self.error = err && err.message ? err.message : String(err);
       }).finally(function () {
-        self.loading = false;
+        if (generation === self.refreshGeneration) self.loading = false;
       });
     },
     normalizeStatus: function (status) {
@@ -668,7 +672,7 @@
       var self = this;
       options = options || {};
       var autosaveKeys = Array.isArray(options.keys) ? options.keys : [];
-      var payload = self.form;
+      var payload = Object.assign({}, self.form);
       var draft = null;
       var draftDirty = self.formDirty;
       if (options.autosave) {
@@ -682,6 +686,7 @@
         autosaveKeys.forEach(function (key) { payload[key] = self.form[key]; });
         draft = Object.assign({}, self.form);
       }
+      var submitted = Object.assign({}, payload);
       if (self.mainAutoSaveTimer) {
         clearTimeout(self.mainAutoSaveTimer);
         self.mainAutoSaveTimer = null;
@@ -694,12 +699,14 @@
       return self.callApi("set_main_config", payload).then(function (result) {
         if (result && result.ok === false) throw new Error(result.error || result.output || "Save failed");
         var savedFields = result && result.saved ? result.saved : {};
+        var confirmed = Object.assign({}, submitted);
         Object.keys(savedFields).forEach(function (key) {
           var value = savedFields[key];
           if (Array.isArray(value)) value = value.join("\n");
-          self.form[key] = value === undefined || value === null ? "" : String(value);
-          if (self.status && self.status.main) self.status.main[key] = self.form[key];
+          confirmed[key] = value === undefined || value === null ? "" : String(value);
         });
+        self.form = Object.assign({}, self.form, confirmed);
+        if (self.status && self.status.main) self.status.main = Object.assign({}, self.status.main, confirmed);
         if (!options.silent) self.notice = "Настройки сохранены.";
         if (!options.autosave) self.formDirty = false;
         return self.refresh().then(function () {
@@ -707,11 +714,12 @@
             self.form = draft;
             self.formDirty = draftDirty;
           } else {
-            Object.keys(savedFields).forEach(function (key) {
-              var value = savedFields[key];
-              if (Array.isArray(value)) value = value.join("\n");
-              self.form[key] = value === undefined || value === null ? "" : String(value);
-            });
+            self.form = Object.assign({}, self.form, confirmed);
+            if (self.status && self.status.main) {
+              self.status.main = Object.assign({}, self.status.main, confirmed);
+              self.saveCachedStatus();
+            }
+            self.formDirty = false;
           }
         });
       }).catch(function (err) {
