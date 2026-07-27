@@ -79,6 +79,11 @@ local function uci_get(config, section, option)
     return first_line(output)
 end
 
+local function uci_get_text(config, section, option)
+    local _, output = run({ "uci", "-q", "get", config .. "." .. section .. "." .. option })
+    return tostring(output or ""):gsub("[\r\n]+$", "")
+end
+
 local function uci_get_list(section, option)
     local _, output = run({ "uci", "-q", "get", "harpynet." .. section .. "." .. option })
     local result = {}
@@ -350,12 +355,12 @@ function M.summary()
             upstream_proxy_password = uci_get("harpynet", "main", "upstream_proxy_password"),
             upstream_proxy_tls_server_name = uci_get("harpynet", "main", "upstream_proxy_tls_server_name"),
             upstream_proxy_community_lists = uci_get_list("main", "upstream_proxy_community_lists"),
-            upstream_proxy_domains = uci_get("harpynet", "main", "upstream_proxy_domains"),
+            upstream_proxy_domains = uci_get_text("harpynet", "main", "upstream_proxy_domains"),
             community_lists = uci_get_list("main", "community_lists"),
             user_domain_list_type = uci_get("harpynet", "main", "user_domain_list_type"),
-            user_domains_text = uci_get("harpynet", "main", "user_domains_text"),
+            user_domains_text = uci_get_text("harpynet", "main", "user_domains_text"),
             user_subnet_list_type = uci_get("harpynet", "main", "user_subnet_list_type"),
-            user_subnets_text = uci_get("harpynet", "main", "user_subnets_text"),
+            user_subnets_text = uci_get_text("harpynet", "main", "user_subnets_text"),
             local_domain_lists = uci_get_list("main", "local_domain_lists"),
             local_subnet_lists = uci_get_list("main", "local_subnet_lists"),
             remote_domain_lists = uci_get_list("main", "remote_domain_lists"),
@@ -742,7 +747,20 @@ function M.set_main_config(params)
         return { ok = false, rc = mode_rc, error = "mihomo_config_apply_failed", output = mode_output }
     end
 
-    return { ok = true, output = mode_output }
+    return {
+        ok = true,
+        output = mode_output,
+        saved = {
+            upstream_proxy_domains = uci_get_text("harpynet", "main", "upstream_proxy_domains"),
+            user_domains_text = uci_get_text("harpynet", "main", "user_domains_text"),
+            user_subnets_text = uci_get_text("harpynet", "main", "user_subnets_text"),
+            local_domain_lists = uci_get_list("main", "local_domain_lists"),
+            local_subnet_lists = uci_get_list("main", "local_subnet_lists"),
+            remote_domain_lists = uci_get_list("main", "remote_domain_lists"),
+            remote_subnet_lists = uci_get_list("main", "remote_subnet_lists"),
+            fully_routed_ips = uci_get_list("main", "fully_routed_ips")
+        }
+    }
 end
 
 
