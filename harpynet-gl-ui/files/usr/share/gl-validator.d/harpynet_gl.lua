@@ -17,6 +17,7 @@ return {
     dashboard = {},
     devices = {},
     connections = {},
+    direct_connections = {},
     close_all_connections = {},
     set_device_route = {
         ip = function(value)

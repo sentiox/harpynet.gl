@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-VERSION="${HARPYNET_VERSION:-1.3.9.3}"
+VERSION="${HARPYNET_VERSION:-1.3.9.4}"
 REF="${HARPYNET_REF:-v$VERSION}"
 REPO="${HARPYNET_REPO:-sentiox/harpynet.gl}"
 WORKDIR=""
@@ -219,6 +219,7 @@ mkdir -p \
 	/www/harpynet/icons \
 	/www/harpynet/flags \
 	/usr/lib/oui-httpd/rpc \
+	/usr/lib \
 	/usr/libexec/rpcd \
 	/usr/share/gl-validator.d \
 	/usr/share/rpcd/acl.d
@@ -228,6 +229,7 @@ cp "$UI/www/views/gl-sdk4-ui-harpynet.common.js" /www/views/gl-sdk4-ui-harpynet.
 cp "$UI/www/harpynet/icons/"*.png /www/harpynet/icons/
 cp "$UI/www/harpynet/flags/"*.png /www/harpynet/flags/
 cp "$UI/usr/lib/oui-httpd/rpc/harpynet_gl" /usr/lib/oui-httpd/rpc/harpynet_gl
+cp "$UI/usr/lib/harpynet_direct_monitor.sh" /usr/lib/harpynet_direct_monitor.sh
 cp "$UI/usr/share/gl-validator.d/harpynet_gl.lua" /usr/share/gl-validator.d/harpynet_gl.lua
 cp "$UI/usr/libexec/rpcd/harpynet_gl" /usr/libexec/rpcd/harpynet_gl
 cp "$UI/usr/share/rpcd/acl.d/harpynet-gl.json" /usr/share/rpcd/acl.d/harpynet-gl.json
@@ -235,11 +237,17 @@ chmod 0644 /usr/share/oui/menu.d/harpynet.json
 chmod 0644 /www/views/gl-sdk4-ui-harpynet.common.js
 chmod 0644 /www/harpynet/icons/*.png /www/harpynet/flags/*.png
 chmod 0644 /usr/lib/oui-httpd/rpc/harpynet_gl
+chmod 0755 /usr/lib/harpynet_direct_monitor.sh
 chmod 0644 /usr/share/gl-validator.d/harpynet_gl.lua
 chmod 0755 /usr/libexec/rpcd/harpynet_gl
 chmod 0644 /usr/share/rpcd/acl.d/harpynet-gl.json
 
 info "Reloading services..."
+if uci -q get dhcp.@dnsmasq[0] >/dev/null 2>&1; then
+	uci -q set dhcp.@dnsmasq[0].logqueries='1'
+	uci -q commit dhcp
+	/etc/init.d/dnsmasq restart >/dev/null 2>&1 || warn "dnsmasq restart failed"
+fi
 /etc/init.d/harpynet enable >/dev/null 2>&1 || true
 if [ -n "$(uci -q get harpynet.main.subscription_url)" ]; then
 	/etc/init.d/harpynet restart >/dev/null 2>&1 || fail "HarpyNet failed to start with Mihomo"

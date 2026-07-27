@@ -469,6 +469,20 @@ function M.connections()
     }
 end
 
+function M.direct_connections()
+    local rc, output = run({ "/bin/sh", "/usr/lib/harpynet_direct_monitor.sh" })
+    local _, devices = run({ "/usr/bin/harpynet", "get_dhcp_clients" })
+    if first_line(output) == "" then
+        output = '{"ok":false,"connections":[],"count":0,"uploadTotal":0,"downloadTotal":0}'
+    end
+    return {
+        ok = rc == 0,
+        rc = rc,
+        json = output,
+        devices = first_line(devices) ~= "" and devices or '{"devices":[]}'
+    }
+end
+
 --[[
     @method-type: call
     @method-name: devices

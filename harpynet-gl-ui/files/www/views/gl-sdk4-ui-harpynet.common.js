@@ -33,13 +33,15 @@
       mihomoConfigError: "",
       mihomoConfig: null,
       mihomoConfigSearch: "",
-      mihomoConfigSection: "all",
       mihomoConfigWrap: false,
       connectionsLoading: false,
       connectionsError: "",
       connectionsSearch: "",
       connectionsMode: "active",
       connections: [],
+      directConnections: [],
+      directConnectionFailures: [],
+      directConnectionsTotals: { upload: 0, download: 0 },
       closedConnections: [],
       connectionFailures: [],
       connectionsInitialized: false,
@@ -906,52 +908,13 @@
       });
       return result;
     },
-    mihomoConfigSections: function () {
-      var config = this.mihomoConfig && this.mihomoConfig.config ? String(this.mihomoConfig.config) : "";
-      var sections = [];
-      config.split(/\r?\n/).forEach(function (line) {
-        var match = line.match(/^([A-Za-z][A-Za-z0-9_-]*):(?:\s|$)/);
-        if (match && sections.indexOf(match[1]) === -1) sections.push(match[1]);
-      });
-      return sections;
-    },
     mihomoVisibleConfig: function () {
       var config = this.mihomoConfig && this.mihomoConfig.config ? String(this.mihomoConfig.config) : "";
-      var section = this.mihomoConfigSection || "all";
-      if (section !== "all") {
-        var lines = config.split(/\r?\n/);
-        var start = lines.findIndex(function (line) { return line.indexOf(section + ":") === 0; });
-        if (start >= 0) {
-          var end = lines.length;
-          for (var i = start + 1; i < lines.length; i += 1) {
-            if (/^[A-Za-z][A-Za-z0-9_-]*:(?:\s|$)/.test(lines[i])) { end = i; break; }
-          }
-          config = lines.slice(start, end).join("\n");
-        }
-      }
       var query = String(this.mihomoConfigSearch || "").trim().toLowerCase();
       if (!query) return config;
       return config.split(/\r?\n/).filter(function (line) {
         return line.toLowerCase().indexOf(query) !== -1;
       }).join("\n");
-    },
-    copyMihomoConfig: function () {
-      var self = this;
-      var text = self.mihomoVisibleConfig();
-      var copied = function () {
-        self.error = "";
-        self.notice = "Конфигурация скопирована";
-      };
-      var failed = function () {
-        self.error = "Не удалось скопировать конфигурацию";
-      };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(copied).catch(function () {
-          self.copyMihomoConfigFallback(text) ? copied() : failed();
-        });
-        return;
-      }
-      self.copyMihomoConfigFallback(text) ? copied() : failed();
     },
     copyMihomoConfigFallback: function (text) {
       var area = document.createElement("textarea");
@@ -1242,6 +1205,11 @@
       var self = this;
       if (self.connectionsRefreshing) return Promise.resolve();
       self.pruneClosedConnections();
+      if (self.status && !self.status.running) {
+        self.connectionsError = "";
+        if (self.connectionsMode === "active" || self.connectionsMode === "proxy") self.connectionsMode = "direct";
+        return self.refreshDirectConnections(silent);
+      }
       self.connectionsRefreshing = true;
       if (!silent) self.connectionsLoading = true;
       if (!silent) self.connectionsError = "";
@@ -1288,6 +1256,76 @@
           upload: Number(payload.uploadTotal || 0),
           download: Number(payload.downloadTotal || 0)
         };
+        return self.refreshDirectConnections(true);
+      }).catch(function (err) {
+        self.connectionsError = err && err.message ? err.message : String(err);
+      }).finally(function () {
+        self.connectionsRefreshing = false;
+        if (!silent) self.connectionsLoading = false;
+      });
+    },
+    directConnectionService: function (port) {
+      port = Number(port || 0);
+      if (port === 53) return "DNS";
+      if (port === 80) return "HTTP";
+      if (port === 443) return "HTTPS";
+      if (port === 123) return "NTP";
+      if (port === 5222) return "Сообщения";
+      if (port === 3478 || port === 5349) return "Голос / STUN";
+      return port ? "Порт " + port : "Сеть";
+    },
+    normalizeDirectConnection: function (item, failure) {
+      var source = String(item && item.source || "");
+      return {
+        id: "direct-" + String(item && item.id || ""),
+        _failure: Boolean(failure),
+        _sourceName: this.connectionDeviceNames[source] || "",
+        error: failure ? "Нет ответа (" + String(item.state || "UNREPLIED") + ")" : "",
+        metadata: {
+          sourceIP: source,
+          sourcePort: Number(item && item.sourcePort || 0),
+          destinationIP: String(item && item.destination || ""),
+          destinationPort: Number(item && item.destinationPort || 0),
+          host: String(item && item.domain || item && item.destination || ""),
+          network: String(item && item.protocol || "")
+        },
+        chains: failure ? ["Сбой"] : ["DIRECT"],
+        rule: this.directConnectionService(item && item.destinationPort),
+        upload: Number(item && item.upload || 0),
+        download: Number(item && item.download || 0)
+      };
+    },
+    refreshDirectConnections: function (silent) {
+      var self = this;
+      self.connectionsRefreshing = true;
+      if (!silent) self.connectionsLoading = true;
+      if (!silent) self.connectionsError = "";
+      return self.callApi("direct_connections").then(function (result) {
+        if (result && result.ok === false) throw new Error(result.output || result.error || "Не удалось прочитать прямые соединения");
+        var payload = self.parseJson(result && result.json, { connections: [] });
+        var devicesPayload = self.parseJson(result && result.devices, { devices: [] });
+        (Array.isArray(devicesPayload.devices) ? devicesPayload.devices : []).forEach(function (device) {
+          if (device && device.ip && device.name) self.connectionDeviceNames[device.ip] = device.name;
+        });
+        var raw = Array.isArray(payload.connections) ? payload.connections : [];
+        self.directConnections = raw.filter(function (item) { return !item.failure; }).map(function (item) {
+          return self.normalizeDirectConnection(item, false);
+        });
+        self.directConnectionFailures = raw.filter(function (item) { return item.failure; }).map(function (item) {
+          return self.normalizeDirectConnection(item, true);
+        });
+        if (self.status && !self.status.running) {
+          self.connections = self.directConnections.slice();
+          self.connectionFailures = self.directConnectionFailures.slice();
+        }
+        self.connectionsInitialized = true;
+        self.directConnectionsTotals = {
+          upload: Number(payload.uploadTotal || 0),
+          download: Number(payload.downloadTotal || 0)
+        };
+        if (self.status && !self.status.running) {
+          self.connectionsTotals = Object.assign({}, self.directConnectionsTotals);
+        }
       }).catch(function (err) {
         self.connectionsError = err && err.message ? err.message : String(err);
       }).finally(function () {
@@ -1603,16 +1641,46 @@
     },
     visibleConnections: function () {
       var self = this;
-      return self.connections.filter(function (connection) {
+      if (self.status && !self.status.running) return self.directConnections;
+      var mihomo = self.connections.filter(function (connection) {
         return !self.isInfrastructureConnection(connection);
+      });
+      return mihomo.filter(function (connection) {
+        return self.connectionKind(connection) !== "direct";
+      }).concat(self.filteredSystemDirect(self.directConnections));
+    },
+    filteredSystemDirect: function (source) {
+      var self = this;
+      var proxied = {};
+      self.connections.forEach(function (connection) {
+        var meta = connection && connection.metadata ? connection.metadata : {};
+        var sourceIP = String(meta.sourceIP || meta.source || "");
+        var destinationIP = String(meta.destinationIP || meta.remoteDestination || "");
+        var host = String(meta.host || "").toLowerCase().replace(/\.$/, "");
+        if (sourceIP && destinationIP) proxied[sourceIP + "|" + destinationIP] = true;
+        if (sourceIP && host) proxied[sourceIP + "|" + host] = true;
+      });
+      return (Array.isArray(source) ? source : []).filter(function (connection) {
+        var meta = connection && connection.metadata ? connection.metadata : {};
+        var sourceIP = String(meta.sourceIP || "");
+        var destinationIP = String(meta.destinationIP || "");
+        var host = String(meta.host || "").toLowerCase().replace(/\.$/, "");
+        if (/^198\.18\./.test(destinationIP)) return false;
+        if (/^eu-[a-z0-9-]+\.harpynet\.com$/.test(host)) return false;
+        if (proxied[sourceIP + "|" + destinationIP]) return false;
+        if (host && proxied[sourceIP + "|" + host]) return false;
+        return true;
       });
     },
     filteredConnections: function () {
       var self = this;
       var query = String(self.connectionsSearch || "").toLowerCase();
+      var failures = self.status && !self.status.running
+        ? self.directConnectionFailures
+        : self.connectionFailures.concat(self.filteredSystemDirect(self.directConnectionFailures));
       var source = self.connectionsMode === "closed"
         ? self.closedConnections
-        : (self.connectionsMode === "failure" ? self.connectionFailures : self.visibleConnections());
+        : (self.connectionsMode === "failure" ? failures : self.visibleConnections());
       return source.filter(function (connection) {
         var kind = self.connectionKind(connection);
         if (self.connectionsMode === "proxy" && kind !== "proxy") return false;
@@ -1635,7 +1703,9 @@
       var active = visibleConnections.length;
       var proxy = visibleConnections.filter(function (item) { return self.connectionKind(item) === "proxy"; }).length;
       var direct = visibleConnections.filter(function (item) { return self.connectionKind(item) === "direct"; }).length;
-      var failure = self.connectionFailures.length;
+      var failure = (self.status && !self.status.running
+        ? self.directConnectionFailures
+        : self.connectionFailures.concat(self.filteredSystemDirect(self.directConnectionFailures))).length;
       var closed = self.closedConnections.length;
       var rows = self.filteredConnections();
       var filters = [
@@ -1676,7 +1746,11 @@
         ]),
         self.connectionsError ? h("div", { staticClass: "hn-error" }, self.connectionsError) : null,
         self.connectionsLoading && !rows.length ? h("div", { staticClass: "hn-placeholder" }, "Загрузка соединений...") : null,
-        !self.connectionsLoading && !rows.length ? h("div", { staticClass: "hn-placeholder" }, self.connectionsMode === "closed" ? "Нет закрытых соединений" : "Нет активных соединений") : null,
+        !self.connectionsLoading && !rows.length ? h("div", { staticClass: "hn-placeholder" },
+          self.status && !self.status.running
+            ? "VPN выключен — интернет работает напрямую. Соединения Mihomo не собираются."
+            : (self.connectionsMode === "closed" ? "Нет закрытых соединений" : "Нет активных соединений")
+        ) : null,
         rows.length ? h("div", { staticClass: "hn-conn-table-wrap" }, [
           h("table", { staticClass: "hn-conn-table" }, [
             h("thead", [h("tr", [
@@ -2239,7 +2313,6 @@
       var config = self.mihomoConfig && self.mihomoConfig.config ? String(self.mihomoConfig.config) : "";
       var stats = self.mihomoConfigStats();
       var overview = self.mihomoConfigOverview();
-      var sections = self.mihomoConfigSections();
       var visibleConfig = self.mihomoVisibleConfig();
       return h("div", {
         staticClass: "hn-modal-backdrop",
@@ -2278,7 +2351,10 @@
               h("div", { staticClass: "hn-mihomo-overview-box" }, [
                 h("div", { staticClass: "hn-mihomo-overview-title" }, "Proxies"),
                 h("div", { staticClass: "hn-mihomo-tags" }, overview.proxies.map(function (name) {
-                  return h("span", { staticClass: "hn-mihomo-tag" }, name);
+                  return h("span", { staticClass: "hn-mihomo-tag proxy", style: { gap: "6px" } }, [
+                    self.flagNode(h, name),
+                    h("span", self.cleanCountryName(name) || name)
+                  ]);
                 }))
               ]),
               h("div", { staticClass: "hn-mihomo-overview-box" }, [
@@ -2294,22 +2370,8 @@
                 attrs: { type: "search", placeholder: "Поиск по YAML..." },
                 domProps: { value: self.mihomoConfigSearch },
                 on: { input: function (event) { self.mihomoConfigSearch = event.target.value; } }
-              }),
-              h("button", { staticClass: "hn-btn", attrs: { type: "button" }, on: { click: self.copyMihomoConfig } }, "Копировать")
+              })
             ]),
-            h("div", { staticClass: "hn-mihomo-sections" }, [
-              h("button", {
-                staticClass: self.mihomoConfigSection === "all" ? "hn-chip active" : "hn-chip",
-                attrs: { type: "button" },
-                on: { click: function () { self.mihomoConfigSection = "all"; } }
-              }, "Весь YAML")
-            ].concat(sections.map(function (section) {
-              return h("button", {
-                staticClass: self.mihomoConfigSection === section ? "hn-chip active" : "hn-chip",
-                attrs: { type: "button" },
-                on: { click: function () { self.mihomoConfigSection = section; } }
-              }, section);
-            }))),
             h("div", { staticClass: "hn-mihomo-editor" }, [
               h("div", { staticClass: "hn-mihomo-gutter" }, visibleConfig.split(/\r?\n/).map(function (_line, index) {
                 return h("div", String(index + 1));
@@ -2610,6 +2672,7 @@
       h("style", [".hn-conn-table th:nth-child(7),.hn-conn-table td:nth-child(7){width:74px!important}.hn-row-actions{display:flex!important;gap:6px;align-items:center;justify-content:flex-end;white-space:nowrap}.hn-row-actions .hn-icon-btn{flex:0 0 32px}@media(max-width:760px){.hn-conn-table tr{padding-right:82px!important}.hn-conn-table td:nth-child(7){display:flex!important;right:8px!important;width:70px!important;margin-top:-16px!important}.hn-row-actions .hn-icon-btn{flex-basis:30px}}"]),
       h("style", ["@media(max-width:1100px){.hn-conn-toolbar{display:grid;grid-template-columns:1fr 44px;gap:10px}.hn-conn-filters,.hn-conn-search-wrap{grid-column:1/-1;width:100%;max-width:none}.hn-conn-toolbar>.hn-btn{grid-column:1/2;width:100%}.hn-conn-toolbar>.hn-icon-btn{grid-column:2/3}.hn-conn-table-wrap{max-height:none;border-top:0}.hn-conn-table,.hn-conn-table tbody,.hn-conn-table tr,.hn-conn-table td{display:block;width:100%!important;box-sizing:border-box}.hn-conn-table thead{display:none}.hn-conn-table tr{position:relative;margin:0 0 10px;padding:10px 82px 10px 10px!important;border:1px solid var(--hn-line);border-radius:8px;background:var(--hn-card-strong)}.hn-conn-table td{border:0!important;padding:2px 0!important}.hn-conn-table td:nth-child(2){margin-top:8px}.hn-conn-table td:nth-child(3),.hn-conn-table td:nth-child(4),.hn-conn-table td:nth-child(6){display:inline-block;width:auto!important;margin-right:14px;vertical-align:top}.hn-conn-table td:nth-child(7){position:absolute;display:flex!important;right:8px!important;top:50%;width:70px!important;margin-top:-16px!important}.hn-route-cell{display:flex!important;max-width:none;white-space:normal}.hn-route-cell span{overflow-wrap:normal;word-break:normal;white-space:normal}.hn-service{white-space:normal}.hn-cell-main{font-weight:800}.hn-cell-sub{white-space:normal}.hn-traffic-cell{font-size:12px}.hn-conn-table .hn-icon-btn{width:30px;height:30px}.hn-row-actions .hn-icon-btn{flex-basis:30px}}"]),
       h("style", [".hn-mihomo-open{height:30px;padding:0 9px;border-radius:7px;border:1px solid rgba(52,201,255,.45);background:rgba(52,201,255,.08);color:var(--hn-primary-2);font-size:12px;font-weight:800;cursor:pointer}.hn-mihomo-open:hover{background:rgba(52,201,255,.16)}.hn-mihomo-modal{width:min(1040px,calc(100vw - 40px));max-height:calc(100vh - 42px);display:flex;flex-direction:column}.hn-mihomo-body{min-height:0;display:flex;flex-direction:column;gap:10px}.hn-mihomo-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.hn-mihomo-stats .hn-mini-stat{min-width:0}.hn-mihomo-overview{display:flex;flex-direction:column;gap:9px}.hn-mihomo-overview-box{padding:10px;border:1px solid var(--hn-border);border-radius:8px;background:rgba(127,127,127,.035)}.hn-mihomo-overview-title{margin-bottom:7px;font-weight:800}.hn-mihomo-tags{display:flex;flex-wrap:wrap;gap:6px}.hn-mihomo-tag{display:inline-flex;align-items:center;min-height:24px;padding:2px 9px;border:1px solid var(--hn-border);border-radius:999px;background:rgba(127,127,127,.06);font-size:12px;font-weight:700}.hn-mihomo-tag.group{border-color:rgba(52,201,255,.28);background:rgba(52,201,255,.07)}.hn-mihomo-toolbar{display:grid;grid-template-columns:minmax(240px,1fr) auto;gap:8px}.hn-mihomo-sections{display:flex;gap:6px;overflow-x:auto;padding-bottom:3px}.hn-mihomo-sections .hn-chip{border:1px solid var(--hn-border);cursor:pointer;white-space:nowrap}.hn-mihomo-sections .hn-chip.active{border-color:var(--hn-primary);color:var(--hn-primary-2)}.hn-mihomo-editor{min-height:250px;max-height:38vh;display:grid;grid-template-columns:auto minmax(0,1fr);overflow:auto;border:1px solid var(--hn-border);border-radius:8px;background:var(--hn-input);scrollbar-color:#596273 transparent}.hn-mihomo-editor::-webkit-scrollbar-corner{background:transparent}.hn-mihomo-editor::-webkit-scrollbar-button{display:none;width:0;height:0;background:transparent}.hn-mihomo-gutter{padding:12px 9px;text-align:right;color:var(--hn-muted);background:rgba(127,127,127,.08);font:12px/1.45 monospace;user-select:none}.hn-mihomo-pre{min-height:250px;margin:0;padding:12px;border:0;background:transparent;color:var(--hn-text);font-size:12px;line-height:1.45;white-space:pre;overflow:visible}.hn-mihomo-pre.wrap{white-space:pre-wrap;overflow-wrap:anywhere}@media(max-width:760px){.hn-head-sub{padding-right:14px;padding-top:52px}.hn-head-sub-actions{left:12px;right:auto}.hn-mihomo-modal{width:calc(100vw - 18px);max-height:calc(100vh - 18px);padding:14px}.hn-mihomo-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.hn-mihomo-toolbar{grid-template-columns:1fr}.hn-mihomo-editor{max-height:42vh}}"]),
+      h("style", [".hn-mihomo-modal{box-sizing:border-box;height:min(900px,calc(100vh - 42px));overflow:hidden}.hn-mihomo-body{flex:1 1 auto;overflow:hidden}.hn-mihomo-stats .hn-mini-value{display:block;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.hn-mihomo-toolbar{grid-template-columns:minmax(0,1fr)}.hn-mihomo-toolbar .hn-input{width:100%;max-width:none}.hn-mihomo-overview{flex:0 1 auto;max-height:220px;overflow:auto}.hn-mihomo-editor{flex:1 1 260px;min-height:150px;max-height:none}.hn-mihomo-modal>.hn-modal-actions{flex:0 0 auto;margin-top:10px;padding-top:10px;border-top:1px solid var(--hn-line);background:var(--hn-card)}@media(max-width:760px){.hn-modal-backdrop{padding:8px}.hn-mihomo-modal{width:calc(100vw - 16px);height:calc(100vh - 16px);max-height:none;padding:12px}.hn-mihomo-modal .hn-modal-head{margin-bottom:10px}.hn-mihomo-overview{max-height:180px}.hn-mihomo-editor{flex-basis:180px;min-height:120px}.hn-mihomo-modal>.hn-modal-actions{justify-content:flex-end;margin-top:8px;padding-top:8px}}@media(max-width:480px){.hn-mihomo-stats{grid-template-columns:1fr}.hn-mihomo-overview{max-height:145px}.hn-mihomo-gutter{padding-left:6px;padding-right:6px}.hn-mihomo-pre{padding:10px}}"]),
       h("div", { staticClass: "hn-head" }, [
         h("div", { staticClass: "hn-head-main" }, [
           h("div", { staticClass: "hn-title" }, "HarpyNet"),

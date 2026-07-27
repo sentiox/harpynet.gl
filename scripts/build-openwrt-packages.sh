@@ -176,7 +176,9 @@ build_ui_root() {
   rm -f "$output_root/www/views/gl-sdk4-ui-internet.common.js.gz"
 
   normalize_package_root_modes "$output_root"
-  chmod 0755 "$output_root/usr/libexec/rpcd/harpynet_gl"
+  chmod 0755 \
+    "$output_root/usr/libexec/rpcd/harpynet_gl" \
+    "$output_root/usr/lib/harpynet_direct_monitor.sh"
 }
 
 installed_size_bytes() {
@@ -241,6 +243,11 @@ EOF
   cat > "$control_dir/postinst" <<'EOF'
 #!/bin/sh
 [ -n "${IPKG_INSTROOT}" ] && exit 0
+if uci -q get dhcp.@dnsmasq[0] >/dev/null 2>&1; then
+  uci -q set dhcp.@dnsmasq[0].logqueries='1'
+  uci -q commit dhcp
+  /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
+fi
 /etc/init.d/rpcd restart >/dev/null 2>&1 || true
 /etc/init.d/nginx reload >/dev/null 2>&1 || true
 exit 0
@@ -336,6 +343,11 @@ EOF
 
   cat > "$scripts_dir/ui-post-install.sh" <<'EOF'
 #!/bin/sh
+if uci -q get dhcp.@dnsmasq[0] >/dev/null 2>&1; then
+  uci -q set dhcp.@dnsmasq[0].logqueries='1'
+  uci -q commit dhcp
+  /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
+fi
 /etc/init.d/rpcd restart >/dev/null 2>&1 || true
 /etc/init.d/nginx reload >/dev/null 2>&1 || true
 exit 0

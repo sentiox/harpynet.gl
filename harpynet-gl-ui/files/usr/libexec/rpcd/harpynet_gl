@@ -127,6 +127,7 @@ case "$1" in
   "summary": {},
   "logs": {},
   "connections": {},
+  "direct_connections": {},
   "devices": {},
   "start": {},
   "stop": {},
@@ -158,6 +159,11 @@ JSON
 				;;
 			connections)
 				run_harpynet clash_api get_connections | jq '{ok:true,json:(. | tojson)}'
+				;;
+			direct_connections)
+				output="$(/bin/sh /usr/lib/harpynet_direct_monitor.sh 2>/dev/null)"
+				devices="$(run_harpynet get_dhcp_clients)"
+				jq -n --arg json "$output" --arg devices "$devices" '{ok:true,json:$json,devices:$devices}'
 				;;
 			devices)
 				run_harpynet get_dhcp_clients | jq '{ok:true,devices:(. | tojson)}'

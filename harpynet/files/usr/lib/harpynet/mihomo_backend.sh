@@ -16,7 +16,7 @@ MIHOMO_MARK="0x100000"
 MIHOMO_BYPASS_MARK="0x200000"
 MIHOMO_TABLE="105"
 MIHOMO_TPROXY_PORT="1602"
-HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.9.3}"
+HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.9.4}"
 
 hn_log() {
     logger -t harpynet -- "$*"
@@ -113,7 +113,7 @@ hn_download_subscription() {
     model="$(ubus call system board 2>/dev/null | jq -r '.model // "OpenWrt router"')"
     os_version="$(. /etc/openwrt_release 2>/dev/null; printf '%s' "$DISTRIB_RELEASE")"
     version="$(opkg status harpynet 2>/dev/null | awk '/^Version:/{print $2; exit}')"
-    [ -n "$version" ] || version="1.3.9.3"
+    [ -n "$version" ] || version="1.3.9.4"
     wan_interface="$(hn_wan_interface)"
 
     set -- -fsSL --connect-timeout 15 --max-time 90 --retry 2
@@ -365,11 +365,22 @@ hn_patch_yaml() {
             print "mode: rule"
             print "enable-process: false"
             print "find-process-mode: off"
+            print "profile:"
+            print "  store-selected: true"
+            print "  store-fake-ip: true"
             print "tun:"
             print "  enable: false"
         }
         /^(external-controller|tproxy-port|routing-mark|allow-lan|log-level|mode|enable-process|find-process-mode):/ { next }
         /^[[:space:]]*-[[:space:]]*PROCESS-(NAME|NAME-REGEX|PATH|PATH-REGEX),/ { next }
+        /^profile:[[:space:]]*$/ {
+            in_profile = 1
+            next
+        }
+        in_profile && /^[^[:space:]]/ {
+            in_profile = 0
+        }
+        in_profile { next }
         /^tun:[[:space:]]*$/ {
             in_tun = 1
             next
@@ -425,6 +436,8 @@ hn_patch_yaml() {
         /^rules:[[:space:]]*$/ {
             in_rules = 1
             print
+            if ((" " fake_domain_providers " ") ~ / meta_domains /)
+                print "  - AND,((NETWORK,UDP),(DST-PORT,443),(RULE-SET,meta_domains)),REJECT"
             if (upstream_enabled == 1) print_upstream_domains(upstream_domains)
             if (upstream_enabled == 1) print_upstream_domains(upstream_ready_domains)
             if (user_domain_type == "text") print_user_domains(user_domains)
@@ -1120,7 +1133,14 @@ hn_status() {
 }
 
 hn_connection_failures() {
-    logread -e mihomo 2>/dev/null | tail -n 400 | awk '
+    local mihomo_pid
+    mihomo_pid="$(pidof mihomo 2>/dev/null | awk '{print $1}')"
+    [ -n "$mihomo_pid" ] || {
+        printf '%s\n' '[]'
+        return 0
+    }
+    logread -e mihomo 2>/dev/null | tail -n 400 | awk -v mihomo_pid="$mihomo_pid" '
+        index($0, "mihomo[" mihomo_pid "]:") == 0 { next }
         / error: / && / --> / {
             split($0, halves, " --> ")
             left = halves[1]
