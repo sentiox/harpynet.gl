@@ -16,7 +16,7 @@ MIHOMO_MARK="0x100000"
 MIHOMO_BYPASS_MARK="0x200000"
 MIHOMO_TABLE="105"
 MIHOMO_TPROXY_PORT="1602"
-HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.9.2}"
+HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.9.3}"
 
 hn_log() {
     logger -t harpynet -- "$*"
@@ -113,7 +113,7 @@ hn_download_subscription() {
     model="$(ubus call system board 2>/dev/null | jq -r '.model // "OpenWrt router"')"
     os_version="$(. /etc/openwrt_release 2>/dev/null; printf '%s' "$DISTRIB_RELEASE")"
     version="$(opkg status harpynet 2>/dev/null | awk '/^Version:/{print $2; exit}')"
-    [ -n "$version" ] || version="1.3.9.2"
+    [ -n "$version" ] || version="1.3.9.3"
     wan_interface="$(hn_wan_interface)"
 
     set -- -fsSL --connect-timeout 15 --max-time 90 --retry 2
@@ -174,7 +174,7 @@ hn_patch_yaml() {
     local user_domain_type user_domains user_subnet_type user_subnets
     local upstream_enabled upstream_name upstream_protocol upstream_server upstream_port
     local upstream_username upstream_password upstream_sni upstream_domains upstream_lists
-    local upstream_ready_domains upstream_snippet upstream_list
+    local upstream_ready_domains upstream_snippet upstream_list fake_domain_providers
     source="$1"
     target="$2"
     log_level="$(hn_uci_get settings log_level)"
@@ -250,12 +250,37 @@ hn_patch_yaml() {
         chmod 600 "$upstream_snippet"
     fi
 
+    fake_domain_providers="$(
+        awk '
+            function emit() {
+                if ((behavior == "domain" || behavior == "classical") && name != "")
+                    printf "%s%s", (count++ ? " " : ""), name
+            }
+            /^rule-providers:[[:space:]]*$/ { in_providers = 1; next }
+            in_providers && /^[^[:space:]]/ { emit(); exit }
+            in_providers && /^  [^[:space:]][^:]*:[[:space:]]*$/ {
+                emit()
+                name = $0
+                sub(/^  /, "", name)
+                sub(/:[[:space:]]*$/, "", name)
+                behavior = ""
+                next
+            }
+            in_providers && /^    behavior:[[:space:]]*/ {
+                behavior = $0
+                sub(/^    behavior:[[:space:]]*/, "", behavior)
+                gsub(/["'"'"']/, "", behavior)
+            }
+            END { if (in_providers) emit() }
+        ' "$source"
+    )"
+
     awk -v level="$log_level" -v fully_routed="$fully_routed" -v smart_routed="$smart_routed" -v bypass_ru="$bypass_ru" \
         -v user_domain_type="$user_domain_type" -v user_domains="$user_domains" \
         -v user_subnet_type="$user_subnet_type" -v user_subnets="$user_subnets" \
         -v upstream_enabled="$upstream_enabled" -v upstream_name="$upstream_name" \
         -v upstream_domains="$upstream_domains" -v upstream_ready_domains="$upstream_ready_domains" \
-        -v upstream_snippet="$upstream_snippet" '
+        -v upstream_snippet="$upstream_snippet" -v fake_domain_providers="$fake_domain_providers" '
         function print_upstream_domains(raw, lines, tokens, line_count, token_count, i, j, value) {
             line_count = split(raw, lines, /\n/)
             for (i = 1; i <= line_count; i++) {
@@ -313,6 +338,24 @@ hn_patch_yaml() {
                 }
             }
         }
+        function print_fake_domains(raw, lines, tokens, line_count, token_count, i, j, value) {
+            line_count = split(raw, lines, /\n/)
+            for (i = 1; i <= line_count; i++) {
+                sub(/\/\/.*/, "", lines[i])
+                gsub(/[,	\r]+/, " ", lines[i])
+                token_count = split(lines[i], tokens, /[ ]+/)
+                for (j = 1; j <= token_count; j++) {
+                    value = tokens[j]
+                    sub(/^https?:\/\//, "", value)
+                    sub(/\/.*$/, "", value)
+                    sub(/:[0-9]+$/, "", value)
+                    sub(/^\+\./, "", value)
+                    sub(/^\*\./, "", value)
+                    if (value ~ /^[A-Za-z0-9_.-]+$/ && value ~ /\./)
+                        print "    - DOMAIN-SUFFIX," tolower(value) ",fake-ip"
+                }
+            }
+        }
         BEGIN {
             print "external-controller: 0.0.0.0:9090"
             print "tproxy-port: 1602"
@@ -322,19 +365,51 @@ hn_patch_yaml() {
             print "mode: rule"
             print "enable-process: false"
             print "find-process-mode: off"
+            print "tun:"
+            print "  enable: false"
         }
         /^(external-controller|tproxy-port|routing-mark|allow-lan|log-level|mode|enable-process|find-process-mode):/ { next }
         /^[[:space:]]*-[[:space:]]*PROCESS-(NAME|NAME-REGEX|PATH|PATH-REGEX),/ { next }
+        /^tun:[[:space:]]*$/ {
+            in_tun = 1
+            next
+        }
+        in_tun && /^[^[:space:]]/ {
+            in_tun = 0
+        }
+        in_tun { next }
         /^dns:[[:space:]]*$/ {
             in_dns = 1
             dns_listen = 0
             print
+            print "  enhanced-mode: fake-ip"
+            print "  fake-ip-range: 198.18.0.1/16"
+            print "  fake-ip-filter-mode: rule"
+            print "  fake-ip-filter:"
+            provider_count = split(fake_domain_providers, providers, /[[:space:]]+/)
+            for (provider_index = 1; provider_index <= provider_count; provider_index++)
+                if (providers[provider_index] != "")
+                    print "    - RULE-SET," providers[provider_index] ",fake-ip"
+            if (upstream_enabled == 1) print_fake_domains(upstream_domains)
+            if (upstream_enabled == 1) print_fake_domains(upstream_ready_domains)
+            if (user_domain_type == "text") print_fake_domains(user_domains)
+            print "    - DOMAIN-SUFFIX,lan,real-ip"
+            print "    - DOMAIN-SUFFIX,local,real-ip"
+            print "    - MATCH,real-ip"
             next
         }
         in_dns && /^[^[:space:]]/ {
             if (!dns_listen) print "  listen: 127.0.0.42:53"
             in_dns = 0
+            skip_fake_filter = 0
         }
+        in_dns && /^  fake-ip-filter:[[:space:]]*$/ {
+            skip_fake_filter = 1
+            next
+        }
+        in_dns && skip_fake_filter && /^    -[[:space:]]/ { next }
+        in_dns && skip_fake_filter { skip_fake_filter = 0 }
+        in_dns && /^  (enhanced-mode|fake-ip-range|fake-ip-filter-mode):[[:space:]]*/ { next }
         in_dns && /^[[:space:]]+listen:[[:space:]]*/ {
             print "  listen: 127.0.0.42:53"
             dns_listen = 1
@@ -518,11 +593,100 @@ hn_interfaces_json() {
     done
 }
 
+hn_proxy_ip_elements() {
+    local selector provider_list name format relpath path converted
+    selector="$1"
+    provider_list="/tmp/harpynet-ip-providers.$$"
+    awk '
+        function emit() {
+            if (behavior == "ipcidr" && path != "")
+                print name "\t" format "\t" path
+        }
+        /^rule-providers:[[:space:]]*$/ {
+            in_providers = 1
+            next
+        }
+        in_providers && /^[^[:space:]]/ {
+            emit()
+            exit
+        }
+        in_providers && /^  [^[:space:]][^:]*:[[:space:]]*$/ {
+            emit()
+            name = $0
+            sub(/^  /, "", name)
+            sub(/:[[:space:]]*$/, "", name)
+            behavior = ""
+            format = "text"
+            path = ""
+            next
+        }
+        in_providers && /^    behavior:[[:space:]]*/ {
+            behavior = $0
+            sub(/^    behavior:[[:space:]]*/, "", behavior)
+            gsub(/["'"'"']/, "", behavior)
+            next
+        }
+        in_providers && /^    format:[[:space:]]*/ {
+            format = $0
+            sub(/^    format:[[:space:]]*/, "", format)
+            gsub(/["'"'"']/, "", format)
+            next
+        }
+        in_providers && /^    path:[[:space:]]*/ {
+            path = $0
+            sub(/^    path:[[:space:]]*/, "", path)
+            gsub(/["'"'"']/, "", path)
+            next
+        }
+        END {
+            if (in_providers) emit()
+        }
+    ' "$MIHOMO_CONFIG" > "$provider_list"
+
+    while IFS="$(printf '\t')" read -r name format relpath; do
+        [ -n "$relpath" ] || continue
+        case "$selector:$name" in
+            discord:*discord*) ;;
+            discord:*) continue ;;
+            general:*discord*|general:*russia_inside*) continue ;;
+        esac
+        case "$relpath" in
+            ./*) path="$MIHOMO_DIR/${relpath#./}" ;;
+            /*) path="$relpath" ;;
+            *) path="$MIHOMO_DIR/$relpath" ;;
+        esac
+        [ -s "$path" ] || continue
+        case "$format" in
+            mrs)
+                converted="/tmp/harpynet-provider.$$"
+                "$MIHOMO_BIN" convert-ruleset ipcidr mrs "$path" "$converted" >/dev/null 2>&1 ||
+                    continue
+                cat "$converted"
+                rm -f "$converted"
+                ;;
+            text) cat "$path" ;;
+        esac
+    done < "$provider_list" |
+        awk '
+            /^[0-9.]+\/[0-9]+$/ && !seen[$0]++ {
+                printf "%s%s", (count++ ? ", " : ""), $0
+            }
+        '
+    rm -f "$provider_list"
+}
+
 hn_setup_policy() {
-    local nft_file interfaces excluded ip first
+    local nft_file interfaces excluded fully_routed smart_routed bypass_ru
+    local proxy_ips discord_ips mode ip first
     nft_file="/tmp/harpynet.nft"
     interfaces="$(hn_interfaces_json)"
     excluded="$(uci -q get harpynet.settings.routing_excluded_ips 2>/dev/null)"
+    fully_routed="$(uci -q get harpynet.main.fully_routed_ips 2>/dev/null)"
+    smart_routed="$(uci -q get harpynet.main.smart_routed_ips 2>/dev/null)"
+    bypass_ru="$(uci -q get harpynet.main.bypass_ru_routed_ips 2>/dev/null)"
+    proxy_ips="$(hn_proxy_ip_elements general)"
+    discord_ips="$(hn_proxy_ip_elements discord)"
+    mode="$(hn_uci_get main connection_type)"
 
     nft delete table inet HarpyNetTable >/dev/null 2>&1 || true
     {
@@ -540,12 +704,53 @@ hn_setup_policy() {
             printf ' }'
         fi
         printf ' }\n'
+        printf ' set full_src { type ipv4_addr; flags interval;'
+        if [ -n "$fully_routed$bypass_ru" ]; then
+            printf ' elements = { '
+            first=1
+            for ip in $fully_routed $bypass_ru; do
+                [ "$first" = 1 ] || printf ', '
+                printf '%s' "$ip"
+                first=0
+            done
+            printf ' }'
+        fi
+        printf ' }\n'
+        printf ' set smart_src { type ipv4_addr; flags interval;'
+        if [ -n "$smart_routed" ]; then
+            printf ' elements = { '
+            first=1
+            for ip in $smart_routed; do
+                [ "$first" = 1 ] || printf ', '
+                printf '%s' "$ip"
+                first=0
+            done
+            printf ' }'
+        fi
+        printf ' }\n'
+        printf ' set proxy_dst { type ipv4_addr; flags interval; auto-merge;'
+        [ -n "$proxy_ips" ] && printf ' elements = { %s }' "$proxy_ips"
+        printf ' }\n'
+        printf ' set discord_voice_dst { type ipv4_addr; flags interval; auto-merge;'
+        [ -n "$discord_ips" ] && printf ' elements = { %s }' "$discord_ips"
+        printf ' }\n'
         printf ' chain mark_prerouting { type filter hook prerouting priority mangle; policy accept;\n'
         printf '  ct status dnat return\n'
         printf '  iifname != @interfaces return\n'
         printf '  ip saddr @bypass_src return\n'
         printf '  ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } return\n'
-        printf '  meta l4proto { tcp, udp } meta mark set %s\n' "$MIHOMO_MARK"
+        printf '  ip saddr @smart_src ip daddr @proxy_dst meta l4proto { tcp, udp } meta mark set %s\n' "$MIHOMO_MARK"
+        printf '  ip saddr @smart_src ip daddr 198.18.0.0/16 meta l4proto { tcp, udp } meta mark set %s\n' "$MIHOMO_MARK"
+        printf '  ip saddr @smart_src ip daddr @discord_voice_dst udp dport { 3478-3481, 19000-20000, 50000-65535 } meta mark set %s\n' "$MIHOMO_MARK"
+        printf '  ip saddr @smart_src return\n'
+        printf '  ip saddr @full_src meta l4proto { tcp, udp } meta mark set %s\n' "$MIHOMO_MARK"
+        if [ "$mode" = "full_proxy" ]; then
+            printf '  meta l4proto { tcp, udp } meta mark set %s\n' "$MIHOMO_MARK"
+        else
+            printf '  ip daddr @proxy_dst meta l4proto { tcp, udp } meta mark set %s\n' "$MIHOMO_MARK"
+            printf '  ip daddr 198.18.0.0/16 meta l4proto { tcp, udp } meta mark set %s\n' "$MIHOMO_MARK"
+            printf '  ip daddr @discord_voice_dst udp dport { 3478-3481, 19000-20000, 50000-65535 } meta mark set %s\n' "$MIHOMO_MARK"
+        fi
         printf ' }\n'
         printf ' chain tproxy_prerouting { type filter hook prerouting priority dstnat; policy accept;\n'
         printf '  meta mark & %s == %s meta l4proto { tcp, udp } tproxy ip to 127.0.0.1:%s\n' "$MIHOMO_MARK" "$MIHOMO_MARK" "$MIHOMO_TPROXY_PORT"
@@ -630,6 +835,9 @@ hn_cleanup() {
     ip -4 rule del fwmark "$MIHOMO_MARK/$MIHOMO_MARK" table "$MIHOMO_TABLE" priority "$MIHOMO_TABLE" >/dev/null 2>&1 || true
     ip -4 route flush table "$MIHOMO_TABLE" >/dev/null 2>&1 || true
     hn_restore_dns
+    case "$(uci -q get dhcp.@dnsmasq[0].server 2>/dev/null)" in
+        *127.0.0.42*) hn_force_direct_dns ;;
+    esac
 }
 
 hn_api() {
@@ -765,6 +973,10 @@ hn_apply_mode() {
     config_payload='{"mode":"rule"}'
     hn_api PATCH "/configs" "$config_payload" >/dev/null || {
         hn_json_error "mihomo_runtime_mode_failed"
+        return 1
+    }
+    hn_setup_policy || {
+        hn_json_error "mihomo_policy_update_failed"
         return 1
     }
 
