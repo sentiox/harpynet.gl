@@ -10,6 +10,7 @@
           "logs",
           "dashboard",
           "connections",
+          "direct_connections",
           "devices",
           "mihomo_config"
         ],

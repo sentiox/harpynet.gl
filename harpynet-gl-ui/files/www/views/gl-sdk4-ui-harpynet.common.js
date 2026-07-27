@@ -2602,7 +2602,7 @@
             self.settingsMultiSelectField(h, "badwan_monitored_interfaces", interfaceOptions, "Выберите интерфейсы")
           ]) : null
         ])),
-        self.field(h, "Включить YACD", "Включает Clash-compatible панель Mihomo. Локальный адрес на этом роутере: http://192.168.8.1:9090/ui", self.settingsFlagField(h, "enable_yacd")),
+        self.field(h, "Включить YACD", "Включает Clash-compatible панель Mihomo. Локальный адрес на этом роутере: http://" + (window.location.hostname || "IP-роутера") + ":9090/ui", self.settingsFlagField(h, "enable_yacd")),
         self.field(h, "Отключить QUIC", "Отключить QUIC протокол для улучшения совместимости или исправления видео-стриминга.", self.settingsFlagField(h, "disable_quic")),
         self.field(h, "Частота обновления списков", "Как часто HarpyNet обновляет доменные/IP списки.", self.settingsSelectField(h, "update_interval", updateOptions)),
         self.field(h, "Частота обновления подписки", "Как часто HarpyNet заново загружает подписку для обновления ключей, серверов и информации о подписке.", self.settingsSelectField(h, "subscription_update_interval", subscriptionUpdateOptions)),
@@ -2613,7 +2613,7 @@
         self.field(h, "Уровень логов", "Уровень логов Mihomo.", self.settingsSelectField(h, "log_level", logOptions)),
         self.field(h, "Исключить NTP", "Синхронизация времени будет идти напрямую, минуя HarpyNet.", self.settingsFlagField(h, "exclude_ntp")),
         self.field(h, "Исключённые из маршрутизации IP-адреса", "Локальные IP-адреса, которые нужно пустить напрямую и не трогать HarpyNet. Обычно не нужно.", self.advancedListSwitch(h, "excluded")),
-        self.advancedListOpen.excluded ? self.field(h, "IP-адреса без маршрутизации", "Локальные IP-адреса, которые нужно пустить напрямую и не трогать HarpyNet.", self.settingsTextAreaField(h, "routing_excluded_ips", "192.168.8.50", 3)) : null,
+        self.advancedListOpen.excluded ? self.field(h, "IP-адреса без маршрутизации", "Локальные IP-адреса, которые нужно пустить напрямую и не трогать HarpyNet.", self.settingsTextAreaField(h, "routing_excluded_ips", "192.168.x.x", 3)) : null,
         h("div", { staticClass: "hn-savebar" }, [
           h("span", { staticClass: "hn-muted" }, self.settingsDirty ? "Есть несохранённые изменения" : "Настройки синхронизированы"),
           h("div", { staticClass: "hn-actions" }, [

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-VERSION="${HARPYNET_VERSION:-1.3.9.4}"
+VERSION="${HARPYNET_VERSION:-1.3.9.5}"
 REF="${HARPYNET_REF:-v$VERSION}"
 REPO="${HARPYNET_REPO:-sentiox/harpynet.gl}"
 WORKDIR=""
@@ -260,4 +260,13 @@ fi
 /etc/init.d/oui-httpd restart >/dev/null 2>&1 || /etc/init.d/nginx reload >/dev/null 2>&1 || warn "OUI reload failed"
 
 info "Done. Open the stock GL.iNet UI and refresh the page:"
-info "http://192.168.8.1/#/harpynet"
+ROUTER_IP="$(uci -q get network.lan.ipaddr 2>/dev/null || true)"
+ROUTER_IP="${ROUTER_IP%%/*}"
+if [ -z "$ROUTER_IP" ]; then
+	ROUTER_IP="$(ip -4 addr show br-lan 2>/dev/null | awk '/inet / { sub(/\\/.*/, "", $2); print $2; exit }')"
+fi
+if [ -n "$ROUTER_IP" ]; then
+	info "http://$ROUTER_IP/#/harpynet"
+else
+	info "Open HarpyNet from the VPN section of the stock GL.iNet UI"
+fi

@@ -4,7 +4,8 @@ Native GL.iNet UI build of HarpyNet.
 
 This repository is intentionally separate from the LuCI application. It keeps the
 HarpyNet backend package and adds a GL.iNet OUI page that appears in the stock
-`http://192.168.8.1/#/` interface under `VPN -> HarpyNet`.
+the router's stock GL.iNet interface (for example `http://<router-lan-ip>/#/`)
+under `VPN -> HarpyNet`.
 
 ## Layout
 

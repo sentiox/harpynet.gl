@@ -469,6 +469,11 @@ function M.connections()
     }
 end
 
+--[[
+    @method-type: call
+    @method-name: direct_connections
+    @method-desc: Get direct system connections outside Mihomo
+--]]
 function M.direct_connections()
     local rc, output = run({ "/bin/sh", "/usr/lib/harpynet_direct_monitor.sh" })
     local _, devices = run({ "/usr/bin/harpynet", "get_dhcp_clients" })
