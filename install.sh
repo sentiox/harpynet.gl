@@ -1,10 +1,10 @@
 #!/bin/sh
 set -eu
 
-VERSION="${HARPYNET_VERSION:-1.3.9.5}"
+VERSION="${HARPYNET_VERSION:-1.3.9.6}"
 REF="${HARPYNET_REF:-v$VERSION}"
 REPO="${HARPYNET_REPO:-sentiox/harpynet.gl}"
-WORKDIR=""
+WORKDIR="/tmp/harpynet-gl-install.$$"
 RUNTIME_PACKAGES="curl jq coreutils-base64 bind-dig kmod-nft-tproxy ca-bundle"
 
 info() {
@@ -21,7 +21,10 @@ fail() {
 }
 
 cleanup() {
-	[ -n "$WORKDIR" ] && [ -d "$WORKDIR" ] && rm -rf "$WORKDIR"
+	if [ -n "$WORKDIR" ] && [ -d "$WORKDIR" ]; then
+		rm -rf "$WORKDIR"
+	fi
+	return 0
 }
 trap cleanup EXIT INT TERM
 
@@ -152,7 +155,6 @@ prepare_source() {
 		return 0
 	fi
 
-	WORKDIR="/tmp/harpynet-gl-install.$$"
 	mkdir -p "$WORKDIR"
 	local archive="$WORKDIR/source.tar.gz"
 	local root=""

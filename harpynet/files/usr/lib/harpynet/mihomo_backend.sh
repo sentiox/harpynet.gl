@@ -16,7 +16,7 @@ MIHOMO_MARK="0x100000"
 MIHOMO_BYPASS_MARK="0x200000"
 MIHOMO_TABLE="105"
 MIHOMO_TPROXY_PORT="1602"
-HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.9.5}"
+HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.9.6}"
 
 hn_log() {
     logger -t harpynet -- "$*"
@@ -113,7 +113,7 @@ hn_download_subscription() {
     model="$(ubus call system board 2>/dev/null | jq -r '.model // "OpenWrt router"')"
     os_version="$(. /etc/openwrt_release 2>/dev/null; printf '%s' "$DISTRIB_RELEASE")"
     version="$(opkg status harpynet 2>/dev/null | awk '/^Version:/{print $2; exit}')"
-    [ -n "$version" ] || version="1.3.9.5"
+    [ -n "$version" ] || version="1.3.9.6"
     wan_interface="$(hn_wan_interface)"
 
     set -- -fsSL --connect-timeout 15 --max-time 90 --retry 2
@@ -556,8 +556,6 @@ hn_prepare_config() {
 
     mv "$candidate" "$MIHOMO_CONFIG"
     cp "$MIHOMO_CONFIG" "$MIHOMO_SAVED"
-    hn_setup_policy || return 1
-    hn_setup_dns || return 1
     return 0
 }
 
@@ -569,6 +567,20 @@ hn_wait_api() {
         [ "$attempt" -lt 20 ] || return 1
         sleep 1
     done
+}
+
+hn_activate() {
+    if ! hn_wait_api; then
+        hn_log "Mihomo did not become ready; keeping direct internet active"
+        hn_cleanup
+        return 1
+    fi
+    if ! hn_apply_mode >/dev/null; then
+        hn_log "Mihomo activation failed; restoring direct internet"
+        hn_cleanup
+        return 1
+    fi
+    return 0
 }
 
 hn_apply_config() {
@@ -1197,6 +1209,7 @@ harpynet_main() {
     shift 2>/dev/null || true
     case "$command" in
         prepare) hn_prepare_config ;;
+        activate) hn_activate ;;
         cleanup) hn_cleanup ;;
         start) /etc/init.d/harpynet start ;;
         stop) /etc/init.d/harpynet stop ;;
