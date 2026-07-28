@@ -16,7 +16,7 @@ MIHOMO_MARK="0x100000"
 MIHOMO_BYPASS_MARK="0x200000"
 MIHOMO_TABLE="105"
 MIHOMO_TPROXY_PORT="1602"
-HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.9.8}"
+HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.9.9}"
 
 hn_log() {
     logger -t harpynet -- "$*"
@@ -113,7 +113,7 @@ hn_download_subscription() {
     model="$(ubus call system board 2>/dev/null | jq -r '.model // "OpenWrt router"')"
     os_version="$(. /etc/openwrt_release 2>/dev/null; printf '%s' "$DISTRIB_RELEASE")"
     version="$(opkg status harpynet 2>/dev/null | awk '/^Version:/{print $2; exit}')"
-    [ -n "$version" ] || version="1.3.9.8"
+    [ -n "$version" ] || version="1.3.9.9"
     wan_interface="$(hn_wan_interface)"
 
     set -- -fsSL --connect-timeout 15 --max-time 90 --retry 2
@@ -174,7 +174,7 @@ hn_patch_yaml() {
     local user_domain_type user_domains user_subnet_type user_subnets
     local upstream_enabled upstream_name upstream_protocol upstream_server upstream_port
     local upstream_username upstream_password upstream_sni upstream_domains upstream_lists
-    local upstream_ready_domains upstream_snippet upstream_list fake_domain_providers
+    local upstream_ready_domains upstream_snippet upstream_list fake_domain_providers fake_domain_rules
     source="$1"
     target="$2"
     log_level="$(hn_uci_get settings log_level)"
@@ -274,13 +274,27 @@ hn_patch_yaml() {
             END { if (in_providers) emit() }
         ' "$source"
     )"
+    fake_domain_rules="$(
+        awk '
+            /^rules:[[:space:]]*$/ { in_rules = 1; next }
+            in_rules && /^[^[:space:]]/ { exit }
+            in_rules && /^[[:space:]]*-[[:space:]]*(DOMAIN|DOMAIN-SUFFIX|DOMAIN-KEYWORD),/ {
+                rule = $0
+                sub(/^[[:space:]]*-[[:space:]]*/, "", rule)
+                count = split(rule, parts, ",")
+                if (count >= 3 && parts[3] != "DIRECT" && parts[3] != "REJECT")
+                    printf "%s%s,%s", (found++ ? " " : ""), parts[1], tolower(parts[2])
+            }
+        ' "$source"
+    )"
 
     awk -v level="$log_level" -v fully_routed="$fully_routed" -v smart_routed="$smart_routed" -v bypass_ru="$bypass_ru" \
         -v user_domain_type="$user_domain_type" -v user_domains="$user_domains" \
         -v user_subnet_type="$user_subnet_type" -v user_subnets="$user_subnets" \
         -v upstream_enabled="$upstream_enabled" -v upstream_name="$upstream_name" \
         -v upstream_domains="$upstream_domains" -v upstream_ready_domains="$upstream_ready_domains" \
-        -v upstream_snippet="$upstream_snippet" -v fake_domain_providers="$fake_domain_providers" '
+        -v upstream_snippet="$upstream_snippet" -v fake_domain_providers="$fake_domain_providers" \
+        -v fake_domain_rules="$fake_domain_rules" '
         function print_upstream_domains(raw, lines, tokens, line_count, token_count, i, j, value) {
             line_count = split(raw, lines, /\n/)
             for (i = 1; i <= line_count; i++) {
@@ -356,6 +370,11 @@ hn_patch_yaml() {
                 }
             }
         }
+        function print_fake_domain_rules(raw, rules, rule_count, i) {
+            rule_count = split(raw, rules, /[[:space:]]+/)
+            for (i = 1; i <= rule_count; i++)
+                if (rules[i] != "") print "    - " rules[i] ",fake-ip"
+        }
         BEGIN {
             print "external-controller: 0.0.0.0:9090"
             print "tproxy-port: 1602"
@@ -401,6 +420,7 @@ hn_patch_yaml() {
             for (provider_index = 1; provider_index <= provider_count; provider_index++)
                 if (providers[provider_index] != "")
                     print "    - RULE-SET," providers[provider_index] ",fake-ip"
+            print_fake_domain_rules(fake_domain_rules)
             if (upstream_enabled == 1) print_fake_domains(upstream_domains)
             if (upstream_enabled == 1) print_fake_domains(upstream_ready_domains)
             if (user_domain_type == "text") print_fake_domains(user_domains)

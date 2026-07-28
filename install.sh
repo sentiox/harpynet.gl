@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-VERSION="${HARPYNET_VERSION:-1.3.9.8}"
+VERSION="${HARPYNET_VERSION:-1.3.9.9}"
 REF="${HARPYNET_REF:-v$VERSION}"
 REPO="${HARPYNET_REPO:-sentiox/harpynet.gl}"
 WORKDIR="/tmp/harpynet-gl-install.$$"
