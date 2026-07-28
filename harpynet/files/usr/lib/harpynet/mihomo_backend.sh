@@ -16,7 +16,7 @@ MIHOMO_MARK="0x100000"
 MIHOMO_BYPASS_MARK="0x200000"
 MIHOMO_TABLE="105"
 MIHOMO_TPROXY_PORT="1602"
-HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.9.9}"
+HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.9.10}"
 
 hn_log() {
     logger -t harpynet -- "$*"
@@ -113,7 +113,7 @@ hn_download_subscription() {
     model="$(ubus call system board 2>/dev/null | jq -r '.model // "OpenWrt router"')"
     os_version="$(. /etc/openwrt_release 2>/dev/null; printf '%s' "$DISTRIB_RELEASE")"
     version="$(opkg status harpynet 2>/dev/null | awk '/^Version:/{print $2; exit}')"
-    [ -n "$version" ] || version="1.3.9.9"
+    [ -n "$version" ] || version="1.3.9.10"
     wan_interface="$(hn_wan_interface)"
 
     set -- -fsSL --connect-timeout 15 --max-time 90 --retry 2
@@ -609,6 +609,7 @@ hn_apply_config() {
     payload="$(jq -nc --arg path "$MIHOMO_CONFIG" '{path:$path}')"
     if hn_api PUT "/configs?force=true" "$payload" >/dev/null 2>&1; then
         hn_apply_mode >/dev/null || return 1
+        hn_flush_dns_cache || return 1
         printf '%s\n' '{"success":true,"reload":"hot"}'
         return 0
     fi
@@ -623,6 +624,7 @@ hn_apply_config() {
         return 1
     }
     hn_apply_mode >/dev/null || return 1
+    hn_flush_dns_cache || return 1
     printf '%s\n' '{"success":true,"reload":"restart"}'
 }
 
@@ -840,6 +842,11 @@ hn_refresh_dns() {
     hn_setup_dns || return 1
     jq -nc --arg bootstrap "$(hn_uci_get settings bootstrap_dns_server)" \
         '{success:true,bootstrap_dns:$bootstrap}'
+}
+
+hn_flush_dns_cache() {
+    [ "$(hn_uci_get settings dont_touch_dhcp)" = "1" ] && return 0
+    /etc/init.d/dnsmasq restart >/dev/null 2>&1
 }
 
 hn_restore_dns() {
