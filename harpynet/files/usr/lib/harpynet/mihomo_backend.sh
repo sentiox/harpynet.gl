@@ -16,7 +16,7 @@ MIHOMO_MARK="0x100000"
 MIHOMO_BYPASS_MARK="0x200000"
 MIHOMO_TABLE="105"
 MIHOMO_TPROXY_PORT="1602"
-HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.9.10}"
+HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.9.11}"
 
 hn_log() {
     logger -t harpynet -- "$*"
@@ -113,7 +113,7 @@ hn_download_subscription() {
     model="$(ubus call system board 2>/dev/null | jq -r '.model // "OpenWrt router"')"
     os_version="$(. /etc/openwrt_release 2>/dev/null; printf '%s' "$DISTRIB_RELEASE")"
     version="$(opkg status harpynet 2>/dev/null | awk '/^Version:/{print $2; exit}')"
-    [ -n "$version" ] || version="1.3.9.10"
+    [ -n "$version" ] || version="1.3.9.11"
     wan_interface="$(hn_wan_interface)"
 
     set -- -fsSL --connect-timeout 15 --max-time 90 --retry 2
@@ -974,6 +974,31 @@ hn_outbounds() {
         ]}'
 }
 
+hn_restore_selected_outbound() {
+    local selected proxies group encoded payload
+    selected="$(hn_uci_get main selected_outbound)"
+    [ -n "$selected" ] || return 0
+
+    proxies="$(hn_api GET /proxies 2>/dev/null)" || return 1
+    group="$(printf '%s' "$proxies" | jq -r '
+        .proxies as $p |
+        if $p["🌍 Страна"] then "🌍 Страна"
+        elif $p["main-out"] then "main-out"
+        else ([ $p | to_entries[] |
+            select(.value.type == "Selector") |
+            select(.key != "GLOBAL") |
+            select(.key | test("Режим|Полный VPN|Умный обход") | not) |
+            .key ][0] // empty) end')"
+    [ -n "$group" ] || return 0
+
+    printf '%s' "$proxies" | jq -e --arg group "$group" --arg selected "$selected" \
+        '.proxies[$group].all // [] | index($selected) != null' >/dev/null || return 0
+
+    encoded="$(hn_urlencode "$group")"
+    payload="$(jq -nc --arg name "$selected" '{name:$name}')"
+    hn_api PUT "/proxies/$encoded" "$payload" >/dev/null
+}
+
 hn_apply_mode() {
     local mode target group encoded payload config_payload
     mode="$(hn_uci_get main connection_type)"
@@ -1003,6 +1028,11 @@ hn_apply_mode() {
             sleep 1
         done
     fi
+
+    hn_restore_selected_outbound || {
+        hn_log "Failed to restore saved outbound selection"
+        return 1
+    }
 
     nft list table inet HarpyNetTable >/dev/null 2>&1 || hn_setup_policy || return 1
     case "$(uci -q get dhcp.@dnsmasq[0].server 2>/dev/null)" in
