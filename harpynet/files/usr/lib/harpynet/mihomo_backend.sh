@@ -16,7 +16,7 @@ MIHOMO_MARK="0x100000"
 MIHOMO_BYPASS_MARK="0x200000"
 MIHOMO_TABLE="105"
 MIHOMO_TPROXY_PORT="1602"
-HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.9.11}"
+HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.9.12}"
 
 hn_log() {
     logger -t harpynet -- "$*"
@@ -113,7 +113,7 @@ hn_download_subscription() {
     model="$(ubus call system board 2>/dev/null | jq -r '.model // "OpenWrt router"')"
     os_version="$(. /etc/openwrt_release 2>/dev/null; printf '%s' "$DISTRIB_RELEASE")"
     version="$(opkg status harpynet 2>/dev/null | awk '/^Version:/{print $2; exit}')"
-    [ -n "$version" ] || version="1.3.9.11"
+    [ -n "$version" ] || version="1.3.9.12"
     wan_interface="$(hn_wan_interface)"
 
     set -- -fsSL --connect-timeout 15 --max-time 90 --retry 2
@@ -438,7 +438,10 @@ hn_patch_yaml() {
             skip_fake_filter = 1
             next
         }
-        in_dns && skip_fake_filter && /^    -[[:space:]]/ { next }
+        # YAML permits both indented and indentless sequences below a mapping
+        # key. Remnawave 3.x emits the latter (two spaces before "-" here),
+        # while older templates commonly use four spaces.
+        in_dns && skip_fake_filter && /^[[:space:]]+-[[:space:]]/ { next }
         in_dns && skip_fake_filter { skip_fake_filter = 0 }
         in_dns && /^  (enhanced-mode|fake-ip-range|fake-ip-filter-mode):[[:space:]]*/ { next }
         in_dns && /^[[:space:]]+listen:[[:space:]]*/ {
@@ -482,13 +485,20 @@ hn_patch_yaml() {
                 }
             next
         }
-        in_rules && /^[^[:space:]]/ { in_rules = 0 }
+        in_rules && /^[^[:space:]-]/ { in_rules = 0 }
         in_rules && /^[[:space:]]*-[[:space:]]*(DOMAIN|DOMAIN-SUFFIX|DOMAIN-KEYWORD|IP-CIDR|IP-CIDR6),/ {
             rule_text = $0
             sub(/^[[:space:]]*-[[:space:]]*/, "", rule_text)
             split(rule_text, rule_parts, ",")
             rule_key = rule_parts[1] "," tolower(rule_parts[2])
             if (seen_rule_key[rule_key]++) next
+        }
+        # Remnawave 3.x may use an indentless sequence for top-level rules.
+        # HarpyNet inserts rules into the same list, so normalize source items
+        # to the conventional two-space indentation before writing the result.
+        in_rules && /^-[[:space:]]/ {
+            print "  " $0
+            next
         }
         { print }
         END {
@@ -918,7 +928,9 @@ hn_primary_group() {
         else ([ $p | to_entries[] |
             select(.value.type == "Selector") |
             select(.key != "GLOBAL") |
-            select(.key | test("Режим|Полный VPN|Умный обход") | not) |
+            select(.key | contains("Режим") | not) |
+            select(.key | contains("Полный VPN") | not) |
+            select(.key | contains("Умный обход") | not) |
             .key ][0] // "GLOBAL") end'
 }
 
@@ -975,7 +987,7 @@ hn_outbounds() {
 }
 
 hn_restore_selected_outbound() {
-    local selected proxies group encoded payload
+    local selected resolved proxies group encoded payload
     selected="$(hn_uci_get main selected_outbound)"
     [ -n "$selected" ] || return 0
 
@@ -987,12 +999,23 @@ hn_restore_selected_outbound() {
         else ([ $p | to_entries[] |
             select(.value.type == "Selector") |
             select(.key != "GLOBAL") |
-            select(.key | test("Режим|Полный VPN|Умный обход") | not) |
+            select(.key | contains("Режим") | not) |
+            select(.key | contains("Полный VPN") | not) |
+            select(.key | contains("Умный обход") | not) |
             .key ][0] // empty) end')"
     [ -n "$group" ] || return 0
 
-    printf '%s' "$proxies" | jq -e --arg group "$group" --arg selected "$selected" \
-        '.proxies[$group].all // [] | index($selected) != null' >/dev/null || return 0
+    resolved="$(printf '%s' "$proxies" | jq -r --arg group "$group" --arg selected "$selected" '
+        .proxies[$group].all // [] |
+        if index($selected) != null then $selected
+        else ([.[] | select(startswith($selected + " | "))][0] // empty)
+        end')"
+    [ -n "$resolved" ] || return 0
+    if [ "$resolved" != "$selected" ]; then
+        selected="$resolved"
+        uci -q set "harpynet.main.selected_outbound=$selected"
+        uci -q commit harpynet
+    fi
 
     encoded="$(hn_urlencode "$group")"
     payload="$(jq -nc --arg name "$selected" '{name:$name}')"
