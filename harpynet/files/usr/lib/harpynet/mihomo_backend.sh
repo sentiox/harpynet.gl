@@ -16,7 +16,7 @@ MIHOMO_MARK="0x100000"
 MIHOMO_BYPASS_MARK="0x200000"
 MIHOMO_TABLE="105"
 MIHOMO_TPROXY_PORT="1602"
-HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.9.12}"
+HARPYNET_VERSION="${HARPYNET_VERSION:-1.3.9.13}"
 
 hn_log() {
     logger -t harpynet -- "$*"
@@ -113,7 +113,7 @@ hn_download_subscription() {
     model="$(ubus call system board 2>/dev/null | jq -r '.model // "OpenWrt router"')"
     os_version="$(. /etc/openwrt_release 2>/dev/null; printf '%s' "$DISTRIB_RELEASE")"
     version="$(opkg status harpynet 2>/dev/null | awk '/^Version:/{print $2; exit}')"
-    [ -n "$version" ] || version="1.3.9.12"
+    [ -n "$version" ] || version="1.3.9.13"
     wan_interface="$(hn_wan_interface)"
 
     set -- -fsSL --connect-timeout 15 --max-time 90 --retry 2
@@ -148,20 +148,27 @@ hn_download_subscription() {
 }
 
 hn_save_metadata() {
-    local info title upload download total expire
+    local info title upload download total expire unlimited_traffic unlimited_time
     info="$(awk 'BEGIN{IGNORECASE=1} /^subscription-userinfo:/{sub(/\r$/,""); sub(/^[^:]*:[ ]*/,""); print; exit}' "$MIHOMO_HEADERS" 2>/dev/null)"
     title="$(awk 'BEGIN{IGNORECASE=1} /^profile-title:/{sub(/\r$/,""); sub(/^[^:]*:[ ]*/,""); print; exit}' "$MIHOMO_HEADERS" 2>/dev/null)"
     upload="$(printf '%s' "$info" | sed -n 's/.*upload=\([0-9]*\).*/\1/p')"
     download="$(printf '%s' "$info" | sed -n 's/.*download=\([0-9]*\).*/\1/p')"
     total="$(printf '%s' "$info" | sed -n 's/.*total=\([0-9]*\).*/\1/p')"
     expire="$(printf '%s' "$info" | sed -n 's/.*expire=\([0-9]*\).*/\1/p')"
+    unlimited_traffic=0
+    unlimited_time=0
+    printf '%s' "$info" | grep -qE '(^|;[[:space:]]*)total=0($|;)' && unlimited_traffic=1
+    printf '%s' "$info" | grep -qE '(^|;[[:space:]]*)expire=0($|;)' && unlimited_time=1
     jq -nc \
         --arg title "$title" \
         --argjson upload "${upload:-0}" \
         --argjson download "${download:-0}" \
         --argjson total "${total:-0}" \
         --argjson expire "${expire:-0}" \
-        '{title:$title,upload:$upload,download:$download,total:$total,expire:$expire}' \
+        --argjson unlimited_traffic "$unlimited_traffic" \
+        --argjson unlimited_time "$unlimited_time" \
+        '{title:$title,upload:$upload,download:$download,total:$total,expire:$expire,
+          isUnlimitedTraffic:($unlimited_traffic == 1),isUnlimitedTime:($unlimited_time == 1)}' \
         > "$MIHOMO_METADATA"
 }
 

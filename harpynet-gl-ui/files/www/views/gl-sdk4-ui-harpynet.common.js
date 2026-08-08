@@ -1178,6 +1178,9 @@
       var match = line.match(/(\d+)/);
       if (match) return match[1] + " дней";
       var metadata = this.dashboardMetadata();
+      if (metadata && (metadata.isUnlimitedTime || (metadata.subscription && metadata.subscription.isUnlimitedTime))) {
+        return "∞ безлимит";
+      }
       var expire = metadata ? Number(metadata.expire || 0) : 0;
       if (expire > 0) {
         var days = Math.max(0, Math.ceil((expire * 1000 - Date.now()) / 86400000));
@@ -1193,6 +1196,9 @@
       var used = traffic
         ? Number(traffic.used || 0) || (Number(traffic.upload || 0) + Number(traffic.download || 0))
         : (Number(metadata && metadata.upload || 0) + Number(metadata && metadata.download || 0));
+      if ((traffic && traffic.isUnlimited) || (metadata && metadata.isUnlimitedTraffic)) {
+        return this.prettyBytes(used) + " / ∞";
+      }
       return this.prettyBytes(used);
     },
     subscriptionTotalTraffic: function () {

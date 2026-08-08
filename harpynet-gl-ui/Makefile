@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=harpynet-gl-ui
-PKG_VERSION:=1.3.9.12
+PKG_VERSION:=1.3.9.13
 PKG_RELEASE:=1
 PKG_MAINTAINER:=sentiox <harpynet@sentiox>
 PKG_LICENSE:=GPL-2.0-or-later
